@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "codex-q"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tiny local SQLite priority queue for feeding directives to autonomous agents and orchestrators."
 readme = "README.md"
 requires-python = ">=3.10"

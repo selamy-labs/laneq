@@ -229,3 +229,134 @@ def test_reap_ignores_fresh_taken_and_handles_unknown_age(tmp_path: Path) -> Non
     assert result.returncode == 0
     assert "#2 -> pending (unknown-age, taken_at=not-a-time)" in result.stdout
     assert rows(db, "SELECT id,status FROM directives ORDER BY id") == [(1, "taken"), (2, "pending")]
+
+
+def test_migration_adds_v2_columns_to_legacy_database(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    con = sqlite3.connect(db)
+    con.execute(
+        """CREATE TABLE directives(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            priority INTEGER NOT NULL DEFAULT 1,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT,
+            taken_at TEXT,
+            done_at TEXT
+        )"""
+    )
+    con.execute("INSERT INTO directives(priority, body, status, created_at) VALUES(1, 'legacy', 'pending', '2026-01-01T00:00:00Z')")
+    con.commit()
+    con.close()
+
+    assert run_q(db, "list").stdout == "#1    P1  legacy\n"
+    cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
+    assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane"} <= cols
+    assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
+
+
+def test_next_records_consumer_lease_and_touch_extends(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P0", "-b", "lease me")
+
+    taken = run_q(db, "next", "--consumer", "worker-a", "--lease", "10m", "--id")
+
+    assert taken.returncode == 0
+    assert taken.stdout == "lease me"
+    assert taken.stderr == "#1\n"
+    stored = rows(db, "SELECT status,taken_by,lease_until,requeue_count FROM directives WHERE id=1")[0]
+    assert stored[0] == "taken"
+    assert stored[1] == "worker-a"
+    assert stored[2] is not None
+    assert stored[3] == 0
+    assert "taken_by=worker-a" in run_q(db, "show", "1").stdout
+    assert "consumers:\n  worker-a: 1" in run_q(db, "stats").stdout
+
+    old_lease = stored[2]
+    touched = run_q(db, "touch", "1", "--lease", "1h")
+
+    assert touched.returncode == 0
+    new_lease = rows(db, "SELECT lease_until FROM directives WHERE id=1")[0][0]
+    assert new_lease > old_lease
+    assert f"#1 lease_until={new_lease}" in touched.stdout
+
+
+def test_expired_lease_lazy_reclaim_requeues_and_tracks_count(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P0", "-b", "expired")
+    assert run_q(db, "next", "--consumer", "dead-worker", "--lease", "1").stdout == "expired"
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+
+    listed = run_q(db, "list")
+
+    assert "#1" in listed.stdout
+    assert "requeues=1" in listed.stdout
+    assert rows(db, "SELECT status,taken_by,lease_until,requeue_count FROM directives WHERE id=1") == [("pending", None, None, 1)]
+    assert run_q(db, "next", "--consumer", "worker-b").stdout == "expired"
+    assert rows(db, "SELECT status,taken_by,requeue_count FROM directives WHERE id=1") == [("taken", "worker-b", 1)]
+
+
+def test_expired_lease_reap_command_reports_reclaimed_items(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-b", "lease")
+    run_q(db, "next", "--consumer", "worker")
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+
+    result = run_q(db, "reap", "--expired-leases")
+
+    assert result.returncode == 0
+    assert "#1 -> pending (expired lease_until=2026-01-01T00:00:00Z, taken_by=worker)" in result.stdout
+
+
+def test_lanes_isolate_next_peek_and_list(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P0", "-b", "default work")
+    run_q(db, "push", "-p", "P0", "--lane", "matchpoint", "-b", "matchpoint work")
+
+    assert run_q(db, "peek", "--lane", "matchpoint").stdout == "#2 [P0 lane=matchpoint]\nmatchpoint work\n"
+    assert "matchpoint work" in run_q(db, "list", "--lane", "matchpoint").stdout
+    assert "default work" not in run_q(db, "list", "--lane", "matchpoint").stdout
+    assert run_q(db, "next", "--lane", "matchpoint").stdout == "matchpoint work"
+    assert run_q(db, "next").stdout == "default work"
+
+
+def test_threading_parent_show_list_and_status(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P1", "-b", "root")
+    run_q(db, "push", "-p", "P0", "--parent", "1", "-b", "child")
+    run_q(db, "push", "-p", "P2", "--parent", "2", "-b", "grandchild")
+
+    shown = run_q(db, "show", "2")
+    assert "parent=#1" in shown.stdout
+    assert "Thread:" in shown.stdout
+    assert "#1 [P1] pending parent=-  root" in shown.stdout
+    assert "#3 [P2] pending parent=#2  grandchild" in shown.stdout
+
+    thread_list = run_q(db, "list", "--thread", "1").stdout
+    assert "#1" in thread_list and "#2" in thread_list and "#3" in thread_list
+    open_status = run_q(db, "thread-status", "2").stdout
+    assert "thread #1 open total=3 open=3" in open_status
+
+    run_q(db, "done", "1")
+    run_q(db, "done", "2")
+    run_q(db, "drop", "3")
+
+    assert run_q(db, "thread-status", "1").stdout == "thread #1 done total=3 open=0\n"
+
+
+def test_push_rejects_missing_parent_and_thread_status_missing_item(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+
+    missing_parent = run_q(db, "push", "--parent", "99", "-b", "orphan")
+    assert missing_parent.returncode == 1
+    assert "no parent #99" in missing_parent.stderr
+
+    missing_thread = run_q(db, "thread-status", "99")
+    assert missing_thread.returncode == 1
+    assert "no item #99" in missing_thread.stderr
