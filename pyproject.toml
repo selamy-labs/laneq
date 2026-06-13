@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "codex-q"
+version = "0.1.0"
+description = "A tiny local SQLite priority queue for feeding directives to autonomous agents and orchestrators."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Selamy Labs" },
+]
+keywords = ["agents", "automation", "cli", "priority-queue", "sqlite"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+  "coverage[toml]>=7.6",
+  "pytest>=8.3",
+]
+
+[project.scripts]
+codex-q = "codex_q.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/selamy-labs/codex-q"
+Repository = "https://github.com/selamy-labs/codex-q"
+Issues = "https://github.com/selamy-labs/codex-q/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/codex_q"]
+
+[tool.coverage.run]
+branch = true
+source = ["codex_q"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
