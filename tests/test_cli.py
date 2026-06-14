@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 import sqlite3
 import subprocess
 import sys
 import threading
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
+from pathlib import Path
 
 from laneq import cli
 
@@ -46,8 +46,7 @@ def run_q_subprocess(db: Path, *args: str, input_text: str | None = None) -> sub
         [sys.executable, "-m", "laneq.cli", *args],
         input=input_text,
         text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        capture_output=True,
         env=env,
         check=False,
     )
@@ -263,7 +262,10 @@ def test_migration_adds_v2_columns_to_legacy_database(tmp_path: Path) -> None:
             done_at TEXT
         )"""
     )
-    con.execute("INSERT INTO directives(priority, body, status, created_at) VALUES(1, 'legacy', 'pending', '2026-01-01T00:00:00Z')")
+    con.execute(
+        "INSERT INTO directives(priority, body, status, created_at) "
+        "VALUES(1, 'legacy', 'pending', '2026-01-01T00:00:00Z')"
+    )
     con.commit()
     con.close()
 
@@ -312,7 +314,9 @@ def test_expired_lease_lazy_reclaim_requeues_and_tracks_count(tmp_path: Path) ->
 
     assert "#1" in listed.stdout
     assert "requeues=1" in listed.stdout
-    assert rows(db, "SELECT status,taken_by,lease_until,requeue_count FROM directives WHERE id=1") == [("pending", None, None, 1)]
+    assert rows(db, "SELECT status,taken_by,lease_until,requeue_count FROM directives WHERE id=1") == [
+        ("pending", None, None, 1)
+    ]
     assert run_q(db, "next", "--consumer", "worker-b").stdout == "expired"
     assert rows(db, "SELECT status,taken_by,requeue_count FROM directives WHERE id=1") == [("taken", "worker-b", 1)]
 
