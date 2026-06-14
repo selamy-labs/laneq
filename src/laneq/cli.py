@@ -5,15 +5,17 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
-from pathlib import Path
 import sqlite3
 import sys
+from pathlib import Path
 from typing import Any
 
 DEFAULT_DB = "~/.claude/laneq.db"
 DB_ENV = "LANEQ_DB"
 LEGACY_DB_ENV = "CODEX_Q_DB"
-DEFAULT_REAP_STALE_SECONDS = int(os.environ.get("LANEQ_REAP_STALE_SECONDS", os.environ.get("CODEX_Q_REAP_STALE_SECONDS", "21600")))
+DEFAULT_REAP_STALE_SECONDS = int(
+    os.environ.get("LANEQ_REAP_STALE_SECONDS", os.environ.get("CODEX_Q_REAP_STALE_SECONDS", "21600"))
+)
 DEFAULT_LEASE_SECONDS = int(os.environ.get("LANEQ_LEASE_SECONDS", os.environ.get("CODEX_Q_LEASE_SECONDS", "1800")))
 DEFAULT_LANE = "default"
 PRIORITIES = {"P0": 0, "P1": 1, "P2": 2}
@@ -118,12 +120,15 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
     if own_conn:
         conn.execute("BEGIN IMMEDIATE")
     rows = conn.execute(
-        "SELECT id, taken_by, lease_until FROM directives WHERE status='taken' AND lease_until IS NOT NULL AND lease_until <= ? ORDER BY priority ASC, id ASC",
+        "SELECT id, taken_by, lease_until FROM directives "
+        "WHERE status='taken' AND lease_until IS NOT NULL AND lease_until <= ? "
+        "ORDER BY priority ASC, id ASC",
         (now,),
     ).fetchall()
     for item_id, _, _ in rows:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
     if own_conn:
@@ -170,7 +175,9 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
     now = dt.datetime.now(dt.timezone.utc)
     conn = connect()
     conn.execute("BEGIN IMMEDIATE")
-    rows = conn.execute("SELECT id, taken_at FROM directives WHERE status='taken' ORDER BY priority ASC, id ASC").fetchall()
+    rows = conn.execute(
+        "SELECT id, taken_at FROM directives WHERE status='taken' ORDER BY priority ASC, id ASC"
+    ).fetchall()
     expired: list[tuple[int, str | None, int | None]] = []
     for item_id, taken_at in rows:
         taken = parse_time(taken_at)
@@ -178,7 +185,8 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
             expired.append((item_id, taken_at, None if taken is None else int((now - taken).total_seconds())))
     for item_id, _, _ in expired:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
     conn.execute("COMMIT")
@@ -220,7 +228,9 @@ def cmd_peek(args: argparse.Namespace) -> int:
     conn = connect()
     reclaim_expired_leases(conn)
     row = conn.execute(
-        "SELECT id, priority, body, lane FROM directives WHERE status='pending' AND lane=? ORDER BY priority ASC, id ASC LIMIT 1",
+        "SELECT id, priority, body, lane FROM directives "
+        "WHERE status='pending' AND lane=? "
+        "ORDER BY priority ASC, id ASC LIMIT 1",
         (args.lane,),
     ).fetchone()
     if row is None:
@@ -258,7 +268,8 @@ def descendants(conn: sqlite3.Connection, item_id: int) -> list[tuple[Any, ...]]
     while stack:
         current = stack.pop()
         children = conn.execute(
-            "SELECT id, priority, status, parent_id, body FROM directives WHERE parent_id=? ORDER BY priority ASC, id ASC",
+            "SELECT id, priority, status, parent_id, body FROM directives "
+            "WHERE parent_id=? ORDER BY priority ASC, id ASC",
             (current,),
         ).fetchall()
         out.extend(children)
@@ -293,7 +304,8 @@ def cmd_show(args: argparse.Namespace) -> int:
     conn = connect()
     reclaim_expired_leases(conn)
     row = conn.execute(
-        "SELECT id, priority, status, created_at, taken_at, done_at, body, taken_by, lease_until, requeue_count, parent_id, lane FROM directives WHERE id=?",
+        "SELECT id, priority, status, created_at, taken_at, done_at, body, taken_by, "
+        "lease_until, requeue_count, parent_id, lane FROM directives WHERE id=?",
         (args.id,),
     ).fetchone()
     if row is None:
@@ -319,7 +331,9 @@ def cmd_list(args: argparse.Namespace) -> int:
     if args.thread is not None:
         rows = thread_rows(conn, args.thread)
     else:
-        query = "SELECT id, priority, status, parent_id, body, taken_by, lease_until, requeue_count, lane FROM directives"
+        query = (
+            "SELECT id, priority, status, parent_id, body, taken_by, lease_until, requeue_count, lane FROM directives"
+        )
         where = []
         if not args.all:
             where.append("status='pending'")
@@ -364,11 +378,20 @@ def set_status(item_id: int, status: str) -> int:
     conn = connect()
     reclaim_expired_leases(conn)
     if status == "pending":
-        cur = conn.execute("UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL WHERE id=?", (item_id,))
+        cur = conn.execute(
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL WHERE id=?",
+            (item_id,),
+        )
     elif status == "done":
-        cur = conn.execute("UPDATE directives SET status='done', done_at=?, taken_by=NULL, lease_until=NULL WHERE id=?", (utc_now(), item_id))
+        cur = conn.execute(
+            "UPDATE directives SET status='done', done_at=?, taken_by=NULL, lease_until=NULL WHERE id=?",
+            (utc_now(), item_id),
+        )
     else:
-        cur = conn.execute("UPDATE directives SET status=?, taken_at=?, taken_by=NULL, lease_until=NULL WHERE id=?", (status, utc_now(), item_id))
+        cur = conn.execute(
+            "UPDATE directives SET status=?, taken_at=?, taken_by=NULL, lease_until=NULL WHERE id=?",
+            (status, utc_now(), item_id),
+        )
     conn.commit()
     if cur.rowcount == 0:
         print(f"laneq: no item #{item_id}", file=sys.stderr)
@@ -409,7 +432,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
     for priority, status, count in rows:
         print(f"{PRIORITY_NAMES[priority]:<3} {status:<8} {count}")
     consumers = conn.execute(
-        "SELECT COALESCE(taken_by, '-'), COUNT(*) FROM directives WHERE status='taken' GROUP BY COALESCE(taken_by, '-') ORDER BY 1"
+        "SELECT COALESCE(taken_by, '-'), COUNT(*) FROM directives "
+        "WHERE status='taken' GROUP BY COALESCE(taken_by, '-') ORDER BY 1"
     ).fetchall()
     if consumers:
         print("consumers:")
@@ -429,7 +453,8 @@ def cmd_touch(args: argparse.Namespace) -> int:
     if cur.rowcount == 0:
         print(f"laneq: no taken item #{args.id}", file=sys.stderr)
         return 1
-    print(f"#{args.id} lease_until={conn.execute('SELECT lease_until FROM directives WHERE id=?', (args.id,)).fetchone()[0]}")
+    lease_until = conn.execute("SELECT lease_until FROM directives WHERE id=?", (args.id,)).fetchone()[0]
+    print(f"#{args.id} lease_until={lease_until}")
     return 0
 
 
@@ -464,7 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser = sub.add_parser("next")
     next_parser.add_argument("--id", action="store_true")
     next_parser.add_argument("--reap-stale-seconds", type=int, nargs="?", const=DEFAULT_REAP_STALE_SECONDS)
-    next_parser.add_argument("--consumer", default=os.environ.get("LANEQ_CONSUMER", os.environ.get("LANEQ_CONSUMER", "-")))
+    next_parser.add_argument(
+        "--consumer", default=os.environ.get("LANEQ_CONSUMER", os.environ.get("CODEX_Q_CONSUMER", "-"))
+    )
     next_parser.add_argument("--lease", default=str(DEFAULT_LEASE_SECONDS))
     next_parser.add_argument("--lane", default=DEFAULT_LANE)
     next_parser.set_defaults(fn=cmd_next)
