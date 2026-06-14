@@ -9,7 +9,7 @@ import threading
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 
-from codex_q import cli
+from laneq import cli
 
 
 class CliResult:
@@ -22,8 +22,8 @@ class CliResult:
 def run_q(db: Path, *args: str, input_text: str | None = None) -> CliResult:
     stdout = StringIO()
     stderr = StringIO()
-    old_db = os.environ.get("CODEX_Q_DB")
-    os.environ["CODEX_Q_DB"] = str(db)
+    old_db = os.environ.get("LANEQ_DB")
+    os.environ["LANEQ_DB"] = str(db)
     old_stdin = sys.stdin
     if input_text is not None:
         sys.stdin = StringIO(input_text)
@@ -33,17 +33,17 @@ def run_q(db: Path, *args: str, input_text: str | None = None) -> CliResult:
     finally:
         sys.stdin = old_stdin
         if old_db is None:
-            os.environ.pop("CODEX_Q_DB", None)
+            os.environ.pop("LANEQ_DB", None)
         else:
-            os.environ["CODEX_Q_DB"] = old_db
+            os.environ["LANEQ_DB"] = old_db
     return CliResult(returncode, stdout.getvalue(), stderr.getvalue())
 
 
 def run_q_subprocess(db: Path, *args: str, input_text: str | None = None) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
-    env["CODEX_Q_DB"] = str(db)
+    env["LANEQ_DB"] = str(db)
     return subprocess.run(
-        [sys.executable, "-m", "codex_q.cli", *args],
+        [sys.executable, "-m", "laneq.cli", *args],
         input=input_text,
         text=True,
         stdout=subprocess.PIPE,
@@ -129,6 +129,24 @@ def test_empty_next_and_peek_exit_3(tmp_path: Path) -> None:
     assert run_q(db, "peek").returncode == 3
 
 
+def test_legacy_codex_db_env_still_selects_database(tmp_path: Path) -> None:
+    db = tmp_path / "legacy-env.db"
+    old_laneq_db = os.environ.pop("LANEQ_DB", None)
+    old_codex_db = os.environ.get("CODEX_Q_DB")
+    os.environ["CODEX_Q_DB"] = str(db)
+    try:
+        with redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            assert cli.main(["push", "-b", "legacy env"]) == 0
+        assert db.exists()
+        assert rows(db, "SELECT body,status FROM directives") == [("legacy env", "pending")]
+    finally:
+        os.environ.pop("CODEX_Q_DB", None)
+        if old_codex_db is not None:
+            os.environ["CODEX_Q_DB"] = old_codex_db
+        if old_laneq_db is not None:
+            os.environ["LANEQ_DB"] = old_laneq_db
+
+
 def test_reap_requeues_stale_taken_item(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
     run_q(db, "push", "-p", "P0", "-b", "stale")
@@ -208,7 +226,7 @@ def test_empty_list_stats_and_no_stale_reap(tmp_path: Path) -> None:
 
     assert run_q(db, "list").stdout == "(queue empty)\n"
     assert run_q(db, "stats").stdout == "(empty)\n"
-    assert run_q(db, "reap", "--stale-seconds", "1").stdout == "codex-q: no stale taken items\n"
+    assert run_q(db, "reap", "--stale-seconds", "1").stdout == "laneq: no stale taken items\n"
 
 
 def test_reap_ignores_fresh_taken_and_handles_unknown_age(tmp_path: Path) -> None:
