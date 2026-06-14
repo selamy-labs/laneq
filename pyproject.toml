@@ -3,8 +3,8 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "codex-q"
-version = "0.2.0"
+name = "laneq"
+version = "0.3.0"
 description = "A tiny local SQLite priority queue for feeding directives to autonomous agents and orchestrators."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -34,19 +34,20 @@ test = [
 ]
 
 [project.scripts]
-codex-q = "codex_q.cli:main"
+laneq = "laneq.cli:main"
+codex-q = "laneq.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/selamy-labs/codex-q"
-Repository = "https://github.com/selamy-labs/codex-q"
-Issues = "https://github.com/selamy-labs/codex-q/issues"
+Homepage = "https://github.com/selamy-labs/laneq"
+Repository = "https://github.com/selamy-labs/laneq"
+Issues = "https://github.com/selamy-labs/laneq/issues"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/codex_q"]
+packages = ["src/laneq"]
 
 [tool.coverage.run]
 branch = true
-source = ["codex_q"]
+source = ["laneq"]
 
 [tool.coverage.report]
 show_missing = true

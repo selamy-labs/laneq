@@ -10,10 +10,11 @@ import sqlite3
 import sys
 from typing import Any
 
-DEFAULT_DB = "~/.claude/codex-queue.db"
-DB_ENV = "CODEX_Q_DB"
-DEFAULT_REAP_STALE_SECONDS = int(os.environ.get("CODEX_Q_REAP_STALE_SECONDS", os.environ.get("LANEQ_REAP_STALE_SECONDS", "21600")))
-DEFAULT_LEASE_SECONDS = int(os.environ.get("CODEX_Q_LEASE_SECONDS", os.environ.get("LANEQ_LEASE_SECONDS", "1800")))
+DEFAULT_DB = "~/.claude/laneq.db"
+DB_ENV = "LANEQ_DB"
+LEGACY_DB_ENV = "CODEX_Q_DB"
+DEFAULT_REAP_STALE_SECONDS = int(os.environ.get("LANEQ_REAP_STALE_SECONDS", os.environ.get("CODEX_Q_REAP_STALE_SECONDS", "21600")))
+DEFAULT_LEASE_SECONDS = int(os.environ.get("LANEQ_LEASE_SECONDS", os.environ.get("CODEX_Q_LEASE_SECONDS", "1800")))
 DEFAULT_LANE = "default"
 PRIORITIES = {"P0": 0, "P1": 1, "P2": 2}
 PRIORITY_NAMES = {value: key for key, value in PRIORITIES.items()}
@@ -39,7 +40,7 @@ def parse_time(value: str | None) -> dt.datetime | None:
 
 
 def db_path() -> Path:
-    return Path(os.path.expanduser(os.environ.get(DB_ENV, DEFAULT_DB)))
+    return Path(os.path.expanduser(os.environ.get(DB_ENV, os.environ.get(LEGACY_DB_ENV, DEFAULT_DB))))
 
 
 def connect() -> sqlite3.Connection:
@@ -131,7 +132,7 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
         conn.commit()
     if not quiet:
         if not rows:
-            print("codex-q: no expired leases")
+            print("laneq: no expired leases")
         for item_id, taken_by, lease_until in rows:
             print(f"#{item_id} -> pending (expired lease_until={lease_until or '-'}, taken_by={taken_by or '-'})")
     return len(rows)
@@ -146,12 +147,12 @@ def parent_exists(conn: sqlite3.Connection, parent_id: int | None) -> bool:
 def cmd_push(args: argparse.Namespace) -> int:
     body = read_body(args)
     if not body.strip():
-        print("codex-q: empty body", file=sys.stderr)
+        print("laneq: empty body", file=sys.stderr)
         return 1
     conn = connect()
     reclaim_expired_leases(conn)
     if not parent_exists(conn, args.parent):
-        print(f"codex-q: no parent #{args.parent}", file=sys.stderr)
+        print(f"laneq: no parent #{args.parent}", file=sys.stderr)
         return 1
     cur = conn.execute(
         "INSERT INTO directives(priority, body, status, created_at, parent_id, lane) VALUES(?, ?, 'pending', ?, ?, ?)",
@@ -183,7 +184,7 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
     conn.execute("COMMIT")
     if not quiet:
         if not expired:
-            print("codex-q: no stale taken items")
+            print("laneq: no stale taken items")
         for item_id, taken_at, age in expired:
             detail = "unknown-age" if age is None else f"age_seconds={age}"
             print(f"#{item_id} -> pending ({detail}, taken_at={taken_at or '-'})")
@@ -296,7 +297,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         (args.id,),
     ).fetchone()
     if row is None:
-        print(f"codex-q: no item #{args.id}", file=sys.stderr)
+        print(f"laneq: no item #{args.id}", file=sys.stderr)
         return 1
     print(
         f"#{row[0]} [{PRIORITY_NAMES[row[1]]}] {row[2]} lane={row[11] or DEFAULT_LANE} "
@@ -353,7 +354,7 @@ def cmd_reprioritize(args: argparse.Namespace) -> int:
     cur = conn.execute("UPDATE directives SET priority=? WHERE id=?", (PRIORITIES[args.priority], args.id))
     conn.commit()
     if cur.rowcount == 0:
-        print(f"codex-q: no item #{args.id}", file=sys.stderr)
+        print(f"laneq: no item #{args.id}", file=sys.stderr)
         return 1
     print(f"#{args.id} -> {args.priority}")
     return 0
@@ -370,7 +371,7 @@ def set_status(item_id: int, status: str) -> int:
         cur = conn.execute("UPDATE directives SET status=?, taken_at=?, taken_by=NULL, lease_until=NULL WHERE id=?", (status, utc_now(), item_id))
     conn.commit()
     if cur.rowcount == 0:
-        print(f"codex-q: no item #{item_id}", file=sys.stderr)
+        print(f"laneq: no item #{item_id}", file=sys.stderr)
         return 1
     print(f"#{item_id} -> {status}")
     return 0
@@ -426,7 +427,7 @@ def cmd_touch(args: argparse.Namespace) -> int:
     )
     conn.commit()
     if cur.rowcount == 0:
-        print(f"codex-q: no taken item #{args.id}", file=sys.stderr)
+        print(f"laneq: no taken item #{args.id}", file=sys.stderr)
         return 1
     print(f"#{args.id} lease_until={conn.execute('SELECT lease_until FROM directives WHERE id=?', (args.id,)).fetchone()[0]}")
     return 0
@@ -437,7 +438,7 @@ def cmd_thread_status(args: argparse.Namespace) -> int:
     reclaim_expired_leases(conn)
     rows = thread_rows(conn, args.id)
     if not rows:
-        print(f"codex-q: no item #{args.id}", file=sys.stderr)
+        print(f"laneq: no item #{args.id}", file=sys.stderr)
         return 1
     open_rows = [row for row in rows if row[2] not in TERMINAL_STATUSES]
     status = "done" if not open_rows else "open"
@@ -449,7 +450,7 @@ def cmd_thread_status(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="codex-q")
+    parser = argparse.ArgumentParser(prog="laneq")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     push = sub.add_parser("push")
@@ -463,7 +464,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_parser = sub.add_parser("next")
     next_parser.add_argument("--id", action="store_true")
     next_parser.add_argument("--reap-stale-seconds", type=int, nargs="?", const=DEFAULT_REAP_STALE_SECONDS)
-    next_parser.add_argument("--consumer", default=os.environ.get("CODEX_Q_CONSUMER", os.environ.get("LANEQ_CONSUMER", "-")))
+    next_parser.add_argument("--consumer", default=os.environ.get("LANEQ_CONSUMER", os.environ.get("LANEQ_CONSUMER", "-")))
     next_parser.add_argument("--lease", default=str(DEFAULT_LEASE_SECONDS))
     next_parser.add_argument("--lane", default=DEFAULT_LANE)
     next_parser.set_defaults(fn=cmd_next)
