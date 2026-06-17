@@ -150,23 +150,17 @@ def parent_exists(conn: sqlite3.Connection, parent_id: int | None) -> bool:
 
 
 def cmd_push(args: argparse.Namespace) -> int:
+    from laneq import core
+
     body = read_body(args)
-    if not body.strip():
-        print("laneq: empty body", file=sys.stderr)
+    try:
+        result = core.push(body, priority=args.priority, parent=args.parent, lane=args.lane)
+    except core.QueueError as error:
+        print(f"laneq: {error}", file=sys.stderr)
         return 1
-    conn = connect()
-    reclaim_expired_leases(conn)
-    if not parent_exists(conn, args.parent):
-        print(f"laneq: no parent #{args.parent}", file=sys.stderr)
-        return 1
-    cur = conn.execute(
-        "INSERT INTO directives(priority, body, status, created_at, parent_id, lane) VALUES(?, ?, 'pending', ?, ?, ?)",
-        (PRIORITIES[args.priority], body, utc_now(), args.parent, args.lane),
-    )
-    conn.commit()
-    parent = f" parent=#{args.parent}" if args.parent is not None else ""
-    lane = "" if args.lane == DEFAULT_LANE else f" lane={args.lane}"
-    print(f"queued #{cur.lastrowid} [{args.priority}{lane}{parent}]: {first_line(body)}")
+    parent = f" parent=#{result['parent']}" if result["parent"] is not None else ""
+    lane = "" if result["lane"] == DEFAULT_LANE else f" lane={result['lane']}"
+    print(f"queued #{result['id']} [{result['priority']}{lane}{parent}]: {result['summary']}")
     return 0
 
 
@@ -200,43 +194,30 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
 
 
 def cmd_next(args: argparse.Namespace) -> int:
-    if args.reap_stale_seconds is not None:
-        reap_stale(args.reap_stale_seconds, quiet=True)
-    conn = connect()
-    conn.execute("BEGIN IMMEDIATE")
-    reclaim_expired_leases(conn)
-    row = conn.execute(
-        "SELECT id, body FROM directives WHERE status='pending' AND lane=? ORDER BY priority ASC, id ASC LIMIT 1",
-        (args.lane,),
-    ).fetchone()
-    if row is None:
-        conn.execute("COMMIT")
-        return EMPTY_EXIT_CODE
-    lease_seconds = parse_duration(args.lease)
-    conn.execute(
-        "UPDATE directives SET status='taken', taken_at=?, taken_by=?, lease_until=? WHERE id=?",
-        (utc_now(), args.consumer, utc_after(lease_seconds), row[0]),
+    from laneq import core
+
+    result = core.take(
+        consumer=args.consumer,
+        lease=args.lease,
+        lane=args.lane,
+        reap_stale_seconds=args.reap_stale_seconds,
     )
-    conn.execute("COMMIT")
+    if result is None:
+        return EMPTY_EXIT_CODE
     if args.id:
-        print(f"#{row[0]}", file=sys.stderr)
-    sys.stdout.write(row[1])
+        print(f"#{result['id']}", file=sys.stderr)
+    sys.stdout.write(result["body"])
     return 0
 
 
 def cmd_peek(args: argparse.Namespace) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    row = conn.execute(
-        "SELECT id, priority, body, lane FROM directives "
-        "WHERE status='pending' AND lane=? "
-        "ORDER BY priority ASC, id ASC LIMIT 1",
-        (args.lane,),
-    ).fetchone()
-    if row is None:
+    from laneq import core
+
+    result = core.peek(lane=args.lane)
+    if result is None:
         return EMPTY_EXIT_CODE
-    lane = "" if row[3] == DEFAULT_LANE else f" lane={row[3]}"
-    print(f"#{row[0]} [{PRIORITY_NAMES[row[1]]}{lane}]\n{row[2]}")
+    lane = "" if result["lane"] == DEFAULT_LANE else f" lane={result['lane']}"
+    print(f"#{result['id']} [{result['priority']}{lane}]\n{result['body']}")
     return 0
 
 
@@ -301,100 +282,66 @@ def print_thread(rows: list[tuple[Any, ...]]) -> None:
 
 
 def cmd_show(args: argparse.Namespace) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    row = conn.execute(
-        "SELECT id, priority, status, created_at, taken_at, done_at, body, taken_by, "
-        "lease_until, requeue_count, parent_id, lane FROM directives WHERE id=?",
-        (args.id,),
-    ).fetchone()
-    if row is None:
-        print(f"laneq: no item #{args.id}", file=sys.stderr)
+    from laneq import core
+
+    try:
+        result = core.show(args.id)
+    except core.QueueError as error:
+        print(f"laneq: {error}", file=sys.stderr)
         return 1
+    parent = "-" if result["parent"] is None else f"#{result['parent']}"
     print(
-        f"#{row[0]} [{PRIORITY_NAMES[row[1]]}] {row[2]} lane={row[11] or DEFAULT_LANE} "
-        f"parent={('-' if row[10] is None else '#' + str(row[10]))} taken_by={row[7] or '-'} "
-        f"lease_until={row[8] or '-'} requeues={row[9] or 0} "
-        f"created={row[3] or '-'} taken={row[4] or '-'} done={row[5] or '-'}"
+        f"#{result['id']} [{result['priority']}] {result['status']} lane={result['lane']} "
+        f"parent={parent} taken_by={result['taken_by'] or '-'} "
+        f"lease_until={result['lease_until'] or '-'} requeues={result['requeue_count']} "
+        f"created={result['created_at'] or '-'} taken={result['taken_at'] or '-'} done={result['done_at'] or '-'}"
     )
-    print(row[6])
-    thread = ancestors(conn, args.id) + descendants(conn, args.id)
-    if thread:
+    print(result["body"])
+    if result["thread"]:
+        conn = connect()
         print_thread(thread_rows(conn, args.id))
     return 0
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    params: list[Any] = []
-    if args.thread is not None:
-        rows = thread_rows(conn, args.thread)
-    else:
-        query = (
-            "SELECT id, priority, status, parent_id, body, taken_by, lease_until, requeue_count, lane FROM directives"
-        )
-        where = []
-        if not args.all:
-            where.append("status='pending'")
-        if args.lane is not None:
-            where.append("lane=?")
-            params.append(args.lane)
-        if where:
-            query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY priority ASC, id ASC"
-        rows = conn.execute(query, params).fetchall()
+    from laneq import core
+
+    rows = core.listing(all_statuses=args.all, lane=args.lane, thread=args.thread)
     if not rows:
         print("(queue empty)")
         return 0
     for row in rows:
-        item_id, priority, status = row[0], row[1], row[2]
-        body = row[4]
-        flag = "" if status == "pending" else f" <{status}>"
+        flag = "" if row["status"] == "pending" else f" <{row['status']}>"
         detail = ""
-        if len(row) >= 9:
-            taken_by, lease_until, requeues, lane = row[5], row[6], row[7], row[8]
-            lane_detail = "" if lane == DEFAULT_LANE else f" lane={lane}"
-            consumer = f" by={taken_by}" if taken_by else ""
-            lease = f" lease={lease_until}" if lease_until else ""
-            requeue = f" requeues={requeues}" if requeues else ""
+        if "lane" in row:
+            lane_detail = "" if row["lane"] == DEFAULT_LANE else f" lane={row['lane']}"
+            consumer = f" by={row['taken_by']}" if row["taken_by"] else ""
+            lease = f" lease={row['lease_until']}" if row["lease_until"] else ""
+            requeue = f" requeues={row['requeue_count']}" if row["requeue_count"] else ""
             detail = f"{lane_detail}{consumer}{lease}{requeue}"
-        print(f"#{item_id:<4} {PRIORITY_NAMES[priority]}{flag}{detail}  {first_line(body)}")
+        print(f"#{row['id']:<4} {row['priority']}{flag}{detail}  {row['summary']}")
     return 0
 
 
 def cmd_reprioritize(args: argparse.Namespace) -> int:
-    conn = connect()
-    cur = conn.execute("UPDATE directives SET priority=? WHERE id=?", (PRIORITIES[args.priority], args.id))
-    conn.commit()
-    if cur.rowcount == 0:
-        print(f"laneq: no item #{args.id}", file=sys.stderr)
+    from laneq import core
+
+    try:
+        core.reprioritize(args.id, args.priority)
+    except core.QueueError as error:
+        print(f"laneq: {error}", file=sys.stderr)
         return 1
     print(f"#{args.id} -> {args.priority}")
     return 0
 
 
 def set_status(item_id: int, status: str) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    if status == "pending":
-        cur = conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL WHERE id=?",
-            (item_id,),
-        )
-    elif status == "done":
-        cur = conn.execute(
-            "UPDATE directives SET status='done', done_at=?, taken_by=NULL, lease_until=NULL WHERE id=?",
-            (utc_now(), item_id),
-        )
-    else:
-        cur = conn.execute(
-            "UPDATE directives SET status=?, taken_at=?, taken_by=NULL, lease_until=NULL WHERE id=?",
-            (status, utc_now(), item_id),
-        )
-    conn.commit()
-    if cur.rowcount == 0:
-        print(f"laneq: no item #{item_id}", file=sys.stderr)
+    from laneq import core
+
+    try:
+        core.set_status(item_id, status)
+    except core.QueueError as error:
+        print(f"laneq: {error}", file=sys.stderr)
         return 1
     print(f"#{item_id} -> {status}")
     return 0
@@ -421,56 +368,45 @@ def cmd_reap(args: argparse.Namespace) -> int:
 
 
 def cmd_stats(args: argparse.Namespace) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    rows = conn.execute(
-        "SELECT priority, status, COUNT(*) FROM directives GROUP BY priority, status ORDER BY priority, status"
-    ).fetchall()
-    if not rows:
+    from laneq import core
+
+    result = core.stats()
+    if not result["by_status"]:
         print("(empty)")
         return 0
-    for priority, status, count in rows:
-        print(f"{PRIORITY_NAMES[priority]:<3} {status:<8} {count}")
-    consumers = conn.execute(
-        "SELECT COALESCE(taken_by, '-'), COUNT(*) FROM directives "
-        "WHERE status='taken' GROUP BY COALESCE(taken_by, '-') ORDER BY 1"
-    ).fetchall()
-    if consumers:
+    for entry in result["by_status"]:
+        print(f"{entry['priority']:<3} {entry['status']:<8} {entry['count']}")
+    if result["consumers"]:
         print("consumers:")
-        for consumer, count in consumers:
-            print(f"  {consumer}: {count}")
+        for entry in result["consumers"]:
+            print(f"  {entry['consumer']}: {entry['count']}")
     return 0
 
 
 def cmd_touch(args: argparse.Namespace) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    cur = conn.execute(
-        "UPDATE directives SET lease_until=? WHERE id=? AND status='taken'",
-        (utc_after(parse_duration(args.lease)), args.id),
-    )
-    conn.commit()
-    if cur.rowcount == 0:
-        print(f"laneq: no taken item #{args.id}", file=sys.stderr)
+    from laneq import core
+
+    try:
+        result = core.touch(args.id, lease=args.lease)
+    except core.QueueError as error:
+        print(f"laneq: {error}", file=sys.stderr)
         return 1
-    lease_until = conn.execute("SELECT lease_until FROM directives WHERE id=?", (args.id,)).fetchone()[0]
-    print(f"#{args.id} lease_until={lease_until}")
+    print(f"#{result['id']} lease_until={result['lease_until']}")
     return 0
 
 
 def cmd_thread_status(args: argparse.Namespace) -> int:
-    conn = connect()
-    reclaim_expired_leases(conn)
-    rows = thread_rows(conn, args.id)
-    if not rows:
-        print(f"laneq: no item #{args.id}", file=sys.stderr)
+    from laneq import core
+
+    try:
+        result = core.thread_status(args.id)
+    except core.QueueError as error:
+        print(f"laneq: {error}", file=sys.stderr)
         return 1
-    open_rows = [row for row in rows if row[2] not in TERMINAL_STATUSES]
-    status = "done" if not open_rows else "open"
-    print(f"thread #{rows[0][0]} {status} total={len(rows)} open={len(open_rows)}")
-    for item_id, priority, item_status, parent_id, body in open_rows:
-        parent = "-" if parent_id is None else f"#{parent_id}"
-        print(f"  #{item_id} [{PRIORITY_NAMES[priority]}] {item_status} parent={parent}  {first_line(body)}")
+    print(f"thread #{result['root']} {result['status']} total={result['total']} open={result['open']}")
+    for item in result["open_items"]:
+        parent = "-" if item["parent"] is None else f"#{item['parent']}"
+        print(f"  #{item['id']} [{item['priority']}] {item['status']} parent={parent}  {item['summary']}")
     return 0
 
 
