@@ -372,6 +372,15 @@ def test_threading_parent_show_list_and_status(tmp_path: Path) -> None:
     assert run_q(db, "thread-status", "1").stdout == "thread #1 done total=3 open=0\n"
 
 
+def test_touch_missing_taken_item_reports_error(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+
+    result = run_q(db, "touch", "404")
+
+    assert result.returncode == 1
+    assert "no taken item #404" in result.stderr
+
+
 def test_push_rejects_missing_parent_and_thread_status_missing_item(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
 

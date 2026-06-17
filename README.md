@@ -13,13 +13,13 @@ the same directive.
 Run directly from GitHub:
 
 ```bash
-uvx --from git+https://github.com/selamy-labs/laneq@v0.3.0 laneq --help
+uvx --from git+https://github.com/selamy-labs/laneq@v0.4.0 laneq --help
 ```
 
 Or install with pipx:
 
 ```bash
-pipx install git+https://github.com/selamy-labs/laneq@v0.3.0
+pipx install git+https://github.com/selamy-labs/laneq@v0.4.0
 ```
 
 The `laneq` name is already occupied on PyPI by an unrelated lane-line
@@ -117,6 +117,48 @@ preserving existing directive ids and statuses.
 
 `codex-q` remains as a compatibility command alias for existing local
 automation. Prefer `laneq` for new docs, scripts, and integrations.
+
+## MCP server
+
+`laneq` ships an optional [Model Context Protocol](https://modelcontextprotocol.io)
+server so agents can drive the queue as typed tools instead of shelling out to
+the CLI. The core package stays dependency-free; the server is an extra:
+
+```bash
+pipx install "git+https://github.com/selamy-labs/laneq@v0.4.0#egg=laneq[mcp]"
+laneq-mcp   # serves over stdio
+```
+
+Or run it directly with `uvx`:
+
+```bash
+uvx --from "git+https://github.com/selamy-labs/laneq@v0.4.0" --with mcp laneq-mcp
+```
+
+Register it with an MCP client (the server reads the same `LANEQ_DB`, so it
+shares one queue with the CLI):
+
+```json
+{
+  "mcpServers": {
+    "laneq": {
+      "command": "laneq-mcp",
+      "env": { "LANEQ_DB": "/home/you/.claude/laneq.db" }
+    }
+  }
+}
+```
+
+The server exposes one tool per queue operation, each with structured JSON
+input and output:
+
+- `laneq_push`, `laneq_next`, `laneq_peek`, `laneq_show`, `laneq_list`
+- `laneq_reprioritize`, `laneq_done`, `laneq_requeue`, `laneq_drop`
+- `laneq_touch`, `laneq_reap`, `laneq_stats`, `laneq_thread_status`
+
+`laneq_next` and `laneq_peek` return `{"empty": true}` when a lane has no
+pending work. Every tool wraps the same queue logic the CLI uses, so the two
+interfaces never diverge.
 
 ## Development
 
