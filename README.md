@@ -7,6 +7,11 @@
 autonomous agents and orchestrators. It never talks to the network and stores
 only the queue data you put into its local database.
 
+Part of Patrick Selamy's public agent-systems work:
+[selamy.dev](https://selamy.dev) ·
+[GitHub profile](https://github.com/pselamy) ·
+[agent-skills](https://github.com/selamy-labs/agent-skills)
+
 Priorities sort as `P0 < P1 < P2`, with FIFO ordering inside each priority.
 `next` atomically takes one pending item so concurrent workers do not receive
 the same directive.
