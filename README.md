@@ -1,5 +1,8 @@
 # laneq
 
+[![CI](https://github.com/selamy-labs/laneq/actions/workflows/test.yml/badge.svg)](https://github.com/selamy-labs/laneq/actions/workflows/test.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 `laneq` is a tiny local SQLite priority queue for feeding directives to
 autonomous agents and orchestrators. It never talks to the network and stores
 only the queue data you put into its local database.
