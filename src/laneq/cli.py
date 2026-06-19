@@ -110,14 +110,16 @@ def migration_plan(conn: sqlite3.Connection) -> list[tuple[str, str, tuple[Any, 
     for column, sql in SCHEMA_MIGRATIONS.items():
         if column not in columns:
             plan.append((f"add_{column}", sql, ()))
-    lane_needs_default = "lane" in columns and conn.execute(
-        "SELECT COUNT(*) FROM directives WHERE lane IS NULL OR lane=''"
-    ).fetchone()[0]
+    lane_needs_default = (
+        "lane" in columns
+        and conn.execute("SELECT COUNT(*) FROM directives WHERE lane IS NULL OR lane=''").fetchone()[0]
+    )
     if lane_needs_default:
         plan.append(DATA_MIGRATIONS[0])
-    requeue_needs_default = "requeue_count" in columns and conn.execute(
-        "SELECT COUNT(*) FROM directives WHERE requeue_count IS NULL"
-    ).fetchone()[0]
+    requeue_needs_default = (
+        "requeue_count" in columns
+        and conn.execute("SELECT COUNT(*) FROM directives WHERE requeue_count IS NULL").fetchone()[0]
+    )
     if requeue_needs_default:
         plan.append(DATA_MIGRATIONS[1])
     return plan
