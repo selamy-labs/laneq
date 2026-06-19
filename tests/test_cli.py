@@ -60,6 +60,31 @@ def rows(db: Path, query: str):
         con.close()
 
 
+def create_legacy_v1_database(db: Path) -> None:
+    con = sqlite3.connect(db)
+    con.execute(
+        """CREATE TABLE directives(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            priority INTEGER NOT NULL DEFAULT 1,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT,
+            taken_at TEXT,
+            done_at TEXT
+        )"""
+    )
+    con.execute(
+        "INSERT INTO directives(priority, body, status, created_at) "
+        "VALUES(1, 'legacy', 'pending', '2026-01-01T00:00:00Z')"
+    )
+    con.commit()
+    con.close()
+
+
+def backup_files(db: Path) -> list[Path]:
+    return sorted(db.parent.glob(f"{db.name}.backup-*"))
+
+
 def test_push_next_done_stats(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
     assert run_q(db, "push", "-p", "P1", "-b", "build a small thing").returncode == 0
@@ -250,26 +275,96 @@ def test_reap_ignores_fresh_taken_and_handles_unknown_age(tmp_path: Path) -> Non
 
 def test_migration_adds_v2_columns_to_legacy_database(tmp_path: Path) -> None:
     db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+
+    assert run_q(db, "list").stdout == "#1    P1  legacy\n"
+    cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
+    assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane"} <= cols
+    assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
+    backups = backup_files(db)
+    assert len(backups) == 1
+    assert rows(backups[0], "PRAGMA integrity_check") == [("ok",)]
+
+
+def test_migration_dry_run_shows_plan_without_touching_database(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+
+    result = run_q(db, "migrate", "--dry-run")
+
+    assert result.returncode == 0
+    assert "laneq migration plan:" in result.stdout
+    assert "- add_taken_by" in result.stdout
+    assert not backup_files(db)
+    cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
+    assert "lane" not in cols
+
+
+def test_explicit_migration_prints_changes_and_verified_backup(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+
+    result = run_q(db, "migrate")
+
+    assert result.returncode == 0
+    assert "laneq migration complete: changes=" in result.stdout
+    assert "backup=" in result.stdout
+    backups = backup_files(db)
+    assert len(backups) == 1
+    assert rows(backups[0], "PRAGMA integrity_check") == [("ok",)]
+
+
+def test_migration_failure_rolls_back_original_and_keeps_backup(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+
+    def fail_after_second_step(step: int, _name: str) -> None:
+        if step == 2:
+            raise RuntimeError("injected migration failure")
+
+    old_hook = cli._MIGRATION_TEST_HOOK
+    cli._MIGRATION_TEST_HOOK = fail_after_second_step
+    try:
+        result = run_q(db, "migrate")
+    finally:
+        cli._MIGRATION_TEST_HOOK = old_hook
+
+    assert result.returncode == 1
+    assert "injected migration failure" in result.stderr
+    cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
+    assert "taken_by" not in cols
+    assert rows(db, "SELECT id, body, status FROM directives") == [(1, "legacy", "pending")]
+    backups = backup_files(db)
+    assert len(backups) == 1
+    assert rows(backups[0], "PRAGMA integrity_check") == [("ok",)]
+
+
+def test_migration_retention_prunes_old_backups(tmp_path: Path) -> None:
+    db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+    for index in range(4):
+        backup = tmp_path / f"legacy.db.backup-2026010{index}T000000Z"
+        backup.write_bytes(db.read_bytes())
+
+    result = run_q(db, "migrate", "--keep-backups", "2")
+
+    assert result.returncode == 0
+    assert len(backup_files(db)) == 2
+    assert "pruned backups:" in result.stdout
+
+
+def test_migration_from_intermediate_schema_adds_remaining_columns(tmp_path: Path) -> None:
+    db = tmp_path / "legacy-v2.db"
+    create_legacy_v1_database(db)
     con = sqlite3.connect(db)
-    con.execute(
-        """CREATE TABLE directives(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            priority INTEGER NOT NULL DEFAULT 1,
-            body TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT,
-            taken_at TEXT,
-            done_at TEXT
-        )"""
-    )
-    con.execute(
-        "INSERT INTO directives(priority, body, status, created_at) "
-        "VALUES(1, 'legacy', 'pending', '2026-01-01T00:00:00Z')"
-    )
+    con.execute("ALTER TABLE directives ADD COLUMN taken_by TEXT")
+    con.execute("ALTER TABLE directives ADD COLUMN lease_until TEXT")
+    con.execute("ALTER TABLE directives ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0")
     con.commit()
     con.close()
 
-    assert run_q(db, "list").stdout == "#1    P1  legacy\n"
+    assert run_q(db, "migrate").returncode == 0
+
     cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
     assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane"} <= cols
     assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
