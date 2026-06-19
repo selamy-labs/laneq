@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import os
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -22,6 +23,33 @@ PRIORITIES = {"P0": 0, "P1": 1, "P2": 2}
 PRIORITY_NAMES = {value: key for key, value in PRIORITIES.items()}
 EMPTY_EXIT_CODE = 3
 TERMINAL_STATUSES = {"done", "dropped"}
+DEFAULT_BACKUP_RETENTION = int(os.environ.get("LANEQ_BACKUP_RETENTION", "5"))
+BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            priority INTEGER NOT NULL DEFAULT 1,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT,
+            taken_at TEXT,
+            done_at TEXT,
+            taken_by TEXT,
+            lease_until TEXT,
+            requeue_count INTEGER NOT NULL DEFAULT 0,
+            parent_id INTEGER REFERENCES directives(id),
+            lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}'
+        )"""
+SCHEMA_MIGRATIONS = {
+    "taken_by": "ALTER TABLE directives ADD COLUMN taken_by TEXT",
+    "lease_until": "ALTER TABLE directives ADD COLUMN lease_until TEXT",
+    "requeue_count": "ALTER TABLE directives ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0",
+    "parent_id": "ALTER TABLE directives ADD COLUMN parent_id INTEGER REFERENCES directives(id)",
+    "lane": f"ALTER TABLE directives ADD COLUMN lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}'",
+}
+DATA_MIGRATIONS = [
+    ("normalize_lane", "UPDATE directives SET lane=? WHERE lane IS NULL OR lane=''", (DEFAULT_LANE,)),
+    ("normalize_requeue_count", "UPDATE directives SET requeue_count=0 WHERE requeue_count IS NULL", ()),
+]
+_MIGRATION_TEST_HOOK = None
 
 
 def utc_now() -> str:
@@ -47,39 +75,135 @@ def db_path() -> Path:
 
 def connect() -> sqlite3.Connection:
     path = db_path()
+    existed_before_open = path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        """CREATE TABLE IF NOT EXISTS directives(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            priority INTEGER NOT NULL DEFAULT 1,
-            body TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'pending',
-            created_at TEXT,
-            taken_at TEXT,
-            done_at TEXT
-        )"""
+    migrate(
+        conn,
+        path=path,
+        existed_before_open=existed_before_open,
+        keep_backups=DEFAULT_BACKUP_RETENTION,
+        report=sys.stderr,
     )
-    migrate(conn)
     return conn
 
 
-def migrate(conn: sqlite3.Connection) -> None:
+class MigrationResult:
+    def __init__(self, changes: list[str], backup_path: Path | None, pruned: list[Path]) -> None:
+        self.changes = changes
+        self.backup_path = backup_path
+        self.pruned = pruned
+
+
+def directives_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='directives'").fetchone()
+    return row is not None
+
+
+def migration_plan(conn: sqlite3.Connection) -> list[tuple[str, str, tuple[Any, ...]]]:
+    if not directives_table_exists(conn):
+        return [("create_directives", BASE_SCHEMA_SQL, ())]
+
     columns = {row[1] for row in conn.execute("PRAGMA table_info(directives)").fetchall()}
-    migrations = {
-        "taken_by": "ALTER TABLE directives ADD COLUMN taken_by TEXT",
-        "lease_until": "ALTER TABLE directives ADD COLUMN lease_until TEXT",
-        "requeue_count": "ALTER TABLE directives ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0",
-        "parent_id": "ALTER TABLE directives ADD COLUMN parent_id INTEGER REFERENCES directives(id)",
-        "lane": f"ALTER TABLE directives ADD COLUMN lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}'",
-    }
-    for column, sql in migrations.items():
+    plan: list[tuple[str, str, tuple[Any, ...]]] = []
+    for column, sql in SCHEMA_MIGRATIONS.items():
         if column not in columns:
-            conn.execute(sql)
-    conn.execute("UPDATE directives SET lane=? WHERE lane IS NULL OR lane=''", (DEFAULT_LANE,))
-    conn.execute("UPDATE directives SET requeue_count=0 WHERE requeue_count IS NULL")
-    conn.commit()
+            plan.append((f"add_{column}", sql, ()))
+    lane_needs_default = "lane" in columns and conn.execute(
+        "SELECT COUNT(*) FROM directives WHERE lane IS NULL OR lane=''"
+    ).fetchone()[0]
+    if lane_needs_default:
+        plan.append(DATA_MIGRATIONS[0])
+    requeue_needs_default = "requeue_count" in columns and conn.execute(
+        "SELECT COUNT(*) FROM directives WHERE requeue_count IS NULL"
+    ).fetchone()[0]
+    if requeue_needs_default:
+        plan.append(DATA_MIGRATIONS[1])
+    return plan
+
+
+def verify_sqlite_integrity(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        result = conn.execute("PRAGMA integrity_check").fetchone()
+    finally:
+        conn.close()
+    if result is None or result[0] != "ok":
+        detail = "<no result>" if result is None else str(result[0])
+        raise RuntimeError(f"backup integrity_check failed for {path}: {detail}")
+
+
+def backup_candidates(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f"{path.name}.backup-*"), key=lambda item: item.name, reverse=True)
+
+
+def prune_old_backups(path: Path, keep: int) -> list[Path]:
+    if keep < 1:
+        raise ValueError("--keep-backups must be at least 1")
+    pruned: list[Path] = []
+    for candidate in backup_candidates(path)[keep:]:
+        candidate.unlink()
+        pruned.append(candidate)
+    return pruned
+
+
+def make_backup_path(path: Path) -> Path:
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    candidate = path.with_name(f"{path.name}.backup-{stamp}")
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = path.with_name(f"{path.name}.backup-{stamp}-{suffix}")
+    return candidate
+
+
+def backup_database(conn: sqlite3.Connection, path: Path, keep_backups: int) -> tuple[Path, list[Path]]:
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    backup_path = make_backup_path(path)
+    shutil.copy2(path, backup_path)
+    verify_sqlite_integrity(backup_path)
+    pruned = prune_old_backups(path, keep_backups)
+    return backup_path, pruned
+
+
+def migrate(
+    conn: sqlite3.Connection,
+    *,
+    path: Path | None = None,
+    existed_before_open: bool = True,
+    dry_run: bool = False,
+    keep_backups: int = DEFAULT_BACKUP_RETENTION,
+    report=None,
+) -> MigrationResult:
+    plan = migration_plan(conn)
+    if dry_run:
+        return MigrationResult([name for name, _, _ in plan], None, [])
+    if not plan:
+        return MigrationResult([], None, [])
+
+    backup_path = None
+    pruned: list[Path] = []
+    if path is not None and existed_before_open:
+        backup_path, pruned = backup_database(conn, path, keep_backups)
+
+    changes: list[str] = []
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        for step, (name, sql, params) in enumerate(plan, start=1):
+            conn.execute(sql, params)
+            changes.append(name)
+            if _MIGRATION_TEST_HOOK is not None:
+                _MIGRATION_TEST_HOOK(step, name)
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+
+    if report is not None and changes:
+        backup = str(backup_path) if backup_path is not None else "<new database>"
+        print(f"laneq: migrated database changes={','.join(changes)} backup={backup}", file=report)
+    return MigrationResult(changes, backup_path, pruned)
 
 
 def first_line(body: str, limit: int = 70) -> str:
@@ -410,6 +534,48 @@ def cmd_thread_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_migrate(args: argparse.Namespace) -> int:
+    path = db_path()
+    existed_before_open = path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    try:
+        try:
+            result = migrate(
+                conn,
+                path=path,
+                existed_before_open=existed_before_open,
+                dry_run=args.dry_run,
+                keep_backups=args.keep_backups,
+            )
+        except Exception as error:
+            print(f"laneq: migration failed: {error}", file=sys.stderr)
+            return 1
+    finally:
+        conn.close()
+
+    if args.dry_run:
+        if not result.changes:
+            print("laneq migration plan: no changes")
+        else:
+            print("laneq migration plan:")
+            for change in result.changes:
+                print(f"- {change}")
+        return 0
+
+    if not result.changes:
+        print("laneq migration complete: no changes")
+        return 0
+    backup = str(result.backup_path) if result.backup_path is not None else "<new database>"
+    print(f"laneq migration complete: changes={','.join(result.changes)} backup={backup}")
+    if result.pruned:
+        print("pruned backups:")
+        for backup_path in result.pruned:
+            print(f"- {backup_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="laneq")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -476,6 +642,11 @@ def build_parser() -> argparse.ArgumentParser:
     thread_status = sub.add_parser("thread-status")
     thread_status.add_argument("id", type=int)
     thread_status.set_defaults(fn=cmd_thread_status)
+
+    migrate_parser = sub.add_parser("migrate")
+    migrate_parser.add_argument("--dry-run", action="store_true")
+    migrate_parser.add_argument("--keep-backups", type=int, default=DEFAULT_BACKUP_RETENTION)
+    migrate_parser.set_defaults(fn=cmd_migrate)
 
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
     return parser
