@@ -34,6 +34,31 @@ The `laneq` name is already occupied on PyPI by an unrelated lane-line
 detection package, so releases are GitHub-tag based until the distribution
 name is resolved.
 
+## Directive lifecycle
+
+Each directive moves through a small state machine. `next` takes the
+highest-priority pending directive and gives it a lease; the worker either
+finishes it (`done`), hands it back (`requeue`), or lets the lease expire — in
+which case `reap` (or the next queue operation) returns it to `pending` and
+increments its `requeue_count`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: push
+    pending --> taken: next (lease + consumer)
+    taken --> done: done
+    taken --> pending: requeue / lease expires + reap
+    taken --> taken: touch (extend lease)
+    pending --> dropped: drop
+    taken --> dropped: drop
+    done --> [*]
+    dropped --> [*]
+```
+
+`peek` reads the next pending directive without changing its state. Priorities
+sort `P0 < P1 < P2`, FIFO within a priority; lanes and parent threads partition
+work without changing this lifecycle.
+
 ## Usage
 
 ```bash
