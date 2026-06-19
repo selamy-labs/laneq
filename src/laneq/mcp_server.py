@@ -106,6 +106,16 @@ def laneq_requeue(id: int) -> dict[str, Any]:
     return core.set_status(id, "pending")
 
 
+def laneq_defer(
+    id: int,
+    until: str | None = None,
+    delay: str | None = None,
+    blocked_by: list[str] | None = None,
+) -> dict[str, Any]:
+    """Defer a directive until a UTC timestamp, duration, and/or dependency ids."""
+    return core.defer(id, until=until, delay=delay, blocked_by=blocked_by)
+
+
 def laneq_drop(id: int) -> dict[str, Any]:
     """Drop a directive (terminal, not done)."""
     return core.set_status(id, "dropped")
@@ -147,6 +157,7 @@ TOOLS = (
     laneq_reprioritize,
     laneq_done,
     laneq_requeue,
+    laneq_defer,
     laneq_drop,
     laneq_touch,
     laneq_reap,

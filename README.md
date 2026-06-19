@@ -46,18 +46,48 @@ increments its `requeue_count`.
 stateDiagram-v2
     [*] --> pending: push
     pending --> taken: next (lease + consumer)
+    pending --> deferred: defer (not-before / deps)
+    deferred --> pending: not-before reached + deps terminal
     taken --> done: done
     taken --> pending: requeue / lease expires + reap
+    taken --> deferred: defer (not-before / deps)
     taken --> taken: touch (extend lease)
     pending --> dropped: drop
     taken --> dropped: drop
+    deferred --> dropped: drop
     done --> [*]
     dropped --> [*]
 ```
 
-`peek` reads the next pending directive without changing its state. Priorities
-sort `P0 < P1 < P2`, FIFO within a priority; lanes and parent threads partition
-work without changing this lifecycle.
+`peek` reads the next actionable pending directive without changing its state.
+Deferred directives are not leased by `next`; queue operations promote them back
+to `pending` only after their `not_before` timestamp has passed and every
+dependency in `blocked_by` is terminal (`done` or `dropped`). Priorities sort
+`P0 < P1 < P2`, FIFO within a priority; lanes and parent threads partition work
+without changing this lifecycle.
+
+## TIME Plane Deferral
+
+`laneq` keeps the queue actionable by separating work that cannot start yet
+from work that is ready to lease. Use `defer` when an item has a future
+not-before time or unmet dependencies:
+
+```bash
+laneq defer 42 --for 2h
+laneq defer 43 --until 2026-06-20T15:00:00Z
+laneq defer 44 --blocked-by 42 --blocked-by 43
+laneq list --all
+```
+
+This is the first incremental TIME-plane primitive. The broader design is:
+
+- a single writer computes effective priority from static priority, importance,
+  deadline, urgency, and starvation age;
+- future work and dependency-blocked work is `deferred`, not repeatedly leased
+  and requeued;
+- workers claim only the next eligible item in their lane;
+- later schema can add explicit `importance`, `deadline`, and
+  `effective_priority` fields without changing the worker contract.
 
 ## Usage
 
@@ -137,6 +167,7 @@ laneq thread-status 1
   `--lane` to filter a lane, or `--thread` to render a thread.
 - `reprioritize`: change a directive priority.
 - `done`, `requeue`, `drop`: update directive status.
+- `defer`: mark a directive deferred until a time, duration, or dependency ids.
 - `touch`: extend the lease for a taken directive.
 - `thread-status`: summarize whether a directive thread still has open work.
 - `reap`: requeue stale taken directives or expired leases.
@@ -145,8 +176,8 @@ laneq thread-status 1
 `next` and `peek` exit with status code `3` when the queue is empty.
 
 Existing v0.1 databases migrate in place on first open. New columns are added
-for consumers, leases, lane names, parent links, and requeue counts while
-preserving existing directive ids and statuses.
+for consumers, leases, lane names, parent links, deferral metadata, and requeue
+counts while preserving existing directive ids and statuses.
 
 Before any migration touches an existing database, `laneq` checkpoints WAL,
 copies `laneq.db` to `laneq.db.backup-<UTC>`, opens that backup, and requires
@@ -198,7 +229,7 @@ input and output:
 
 - `laneq_push`, `laneq_next`, `laneq_peek`, `laneq_show`, `laneq_list`
 - `laneq_reprioritize`, `laneq_done`, `laneq_requeue`, `laneq_drop`
-- `laneq_touch`, `laneq_reap`, `laneq_stats`, `laneq_thread_status`
+- `laneq_defer`, `laneq_touch`, `laneq_reap`, `laneq_stats`, `laneq_thread_status`
 
 `laneq_next` and `laneq_peek` return `{"empty": true}` when a lane has no
 pending work. Every tool wraps the same queue logic the CLI uses, so the two
