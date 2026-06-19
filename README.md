@@ -204,6 +204,29 @@ input and output:
 pending work. Every tool wraps the same queue logic the CLI uses, so the two
 interfaces never diverge.
 
+### Observability (OpenTelemetry)
+
+The server runs unmodified under
+[OpenTelemetry zero-code auto-instrumentation](https://opentelemetry.io/docs/zero-code/python/).
+Install the `otel` extra and launch via `opentelemetry-instrument`:
+
+```bash
+pipx install "git+https://github.com/selamy-labs/laneq@v0.4.0#egg=laneq[mcp,otel]"
+OTEL_SERVICE_NAME=laneq-mcp \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317 \
+OTEL_TRACES_EXPORTER=otlp \
+  opentelemetry-instrument laneq-mcp
+```
+
+Config is **vendor-neutral** — point `OTEL_EXPORTER_OTLP_ENDPOINT` at any
+OTLP collector; the collector (not this server) owns any Cloud Trace / vendor
+coupling.
+
+> **stdio safety (required):** this server speaks MCP over stdin/stdout, so its
+> stdout carries the JSON-RPC protocol. Export traces/logs via **OTLP only** —
+> **never** set `OTEL_TRACES_EXPORTER=console` (or any stdout exporter), which
+> would interleave span output into the protocol stream and break the client.
+
 ## Development
 
 ```bash
