@@ -44,6 +44,7 @@ def test_server_registers_every_queue_tool() -> None:
         "laneq_reprioritize",
         "laneq_done",
         "laneq_requeue",
+        "laneq_defer",
         "laneq_drop",
         "laneq_touch",
         "laneq_reap",
@@ -140,6 +141,21 @@ def test_reprioritize_requeue_and_drop(tmp_path: Path) -> None:
     assert call(db, "laneq_next")["body"] == "low"
     assert call(db, "laneq_requeue", {"id": 1}) == {"id": 1, "status": "pending"}
     assert call(db, "laneq_drop", {"id": 1}) == {"id": 1, "status": "dropped"}
+
+
+def test_defer_tool_blocks_next_until_dependency_done(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    call(db, "laneq_push", {"body": "dependency", "priority": "P0"})
+    call(db, "laneq_push", {"body": "blocked", "priority": "P0"})
+    call(db, "laneq_push", {"body": "fallback", "priority": "P1"})
+
+    deferred = call(db, "laneq_defer", {"id": 2, "blocked_by": ["1"]})
+
+    assert deferred == {"id": 2, "status": "deferred", "not_before": None, "blocked_by": "1"}
+    assert call(db, "laneq_next")["body"] == "dependency"
+    assert call(db, "laneq_next")["body"] == "fallback"
+    call(db, "laneq_done", {"id": 1})
+    assert call(db, "laneq_next")["body"] == "blocked"
 
 
 def test_touch_extends_lease(tmp_path: Path) -> None:

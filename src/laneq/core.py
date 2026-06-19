@@ -78,6 +78,7 @@ def take(
     conn = cli.connect()
     conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     row = conn.execute(
         "SELECT id, body FROM directives WHERE status='pending' AND lane=? ORDER BY priority ASC, id ASC LIMIT 1",
         (lane,),
@@ -98,6 +99,7 @@ def peek(*, lane: str = DEFAULT_LANE) -> dict[str, Any] | None:
     """Return the next pending directive in ``lane`` without taking it."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     row = conn.execute(
         "SELECT id, priority, body, lane FROM directives "
         "WHERE status='pending' AND lane=? ORDER BY priority ASC, id ASC LIMIT 1",
@@ -125,9 +127,10 @@ def show(item_id: int) -> dict[str, Any]:
     """Return the full record for ``item_id`` including its thread."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     row = conn.execute(
         "SELECT id, priority, status, created_at, taken_at, done_at, body, taken_by, "
-        "lease_until, requeue_count, parent_id, lane FROM directives WHERE id=?",
+        "lease_until, requeue_count, parent_id, lane, not_before, blocked_by FROM directives WHERE id=?",
         (item_id,),
     ).fetchone()
     if row is None:
@@ -145,6 +148,8 @@ def show(item_id: int) -> dict[str, Any]:
         "created_at": row[3],
         "taken_at": row[4],
         "done_at": row[5],
+        "not_before": row[12],
+        "blocked_by": row[13],
         "body": row[6],
         "thread": _thread_payload(conn, item_id) if has_thread else [],
     }
@@ -159,6 +164,7 @@ def listing(
     """List directives. Mirrors ``laneq list`` filtering semantics."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     if thread is not None:
         rows = cli.thread_rows(conn, thread)
         return [
@@ -172,7 +178,10 @@ def listing(
             for r in rows
         ]
     params: list[Any] = []
-    query = "SELECT id, priority, status, parent_id, body, taken_by, lease_until, requeue_count, lane FROM directives"
+    query = (
+        "SELECT id, priority, status, parent_id, body, taken_by, lease_until, requeue_count, lane, "
+        "not_before, blocked_by FROM directives"
+    )
     where = []
     if not all_statuses:
         where.append("status='pending'")
@@ -193,6 +202,8 @@ def listing(
             "lease_until": r[6],
             "requeue_count": r[7] or 0,
             "lane": r[8],
+            "not_before": r[9],
+            "blocked_by": r[10],
             "summary": cli.first_line(r[4]),
         }
         for r in rows
@@ -214,9 +225,11 @@ def set_status(item_id: int, status: str) -> dict[str, Any]:
     """Set a directive's status (``done``, ``pending``/requeue, ``dropped``)."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     if status == "pending":
         cur = conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL WHERE id=?",
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "not_before=NULL, blocked_by=NULL WHERE id=?",
             (item_id,),
         )
     elif status == "done":
@@ -235,10 +248,53 @@ def set_status(item_id: int, status: str) -> dict[str, Any]:
     return {"id": item_id, "status": status}
 
 
+def defer(
+    item_id: int,
+    *,
+    until: str | None = None,
+    delay: str | int | None = None,
+    blocked_by: list[str] | None = None,
+) -> dict[str, Any]:
+    """Defer a directive until a time and/or dependency items are terminal."""
+    if until and delay:
+        raise QueueError("use either --until or --for, not both")
+    not_before = None
+    if until:
+        if cli.parse_time(until) is None:
+            raise QueueError("invalid --until; expected UTC timestamp like 2026-06-19T19:00:00Z")
+        not_before = until
+    elif delay:
+        not_before = cli.utc_after(cli.parse_duration(delay))
+    dep_ids: list[int] = []
+    for value in blocked_by or []:
+        dep_ids.extend(cli.parse_dependency_ids(value))
+    dep_ids = sorted(set(dep_ids))
+    if not not_before and not dep_ids:
+        raise QueueError("defer requires --until, --for, or --blocked-by")
+    if item_id in dep_ids:
+        raise QueueError("an item cannot be blocked by itself")
+    conn = cli.connect()
+    cli.reclaim_expired_leases(conn)
+    for dep_id in dep_ids:
+        if not cli.parent_exists(conn, dep_id):
+            raise QueueError(f"no dependency #{dep_id}")
+    blocked_text = cli.format_dependency_ids(dep_ids)
+    cur = conn.execute(
+        "UPDATE directives SET status='deferred', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+        "not_before=?, blocked_by=? WHERE id=?",
+        (not_before, blocked_text, item_id),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise QueueError(f"no item #{item_id}")
+    return {"id": item_id, "status": "deferred", "not_before": not_before, "blocked_by": blocked_text}
+
+
 def touch(item_id: int, *, lease: str | int | None = None) -> dict[str, Any]:
     """Extend the lease on a taken directive."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     cur = conn.execute(
         "UPDATE directives SET lease_until=? WHERE id=? AND status='taken'",
         (cli.utc_after(cli.parse_duration(lease)), item_id),
@@ -263,6 +319,7 @@ def stats() -> dict[str, Any]:
     """Return counts by priority/status and taken counts by consumer."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     by_status = [
         {"priority": PRIORITY_NAMES[priority], "status": status, "count": count}
         for priority, status, count in conn.execute(
@@ -283,6 +340,7 @@ def thread_status(item_id: int) -> dict[str, Any]:
     """Summarise whether the directive thread rooted at ``item_id`` has open work."""
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
+    cli.reclaim_deferred(conn)
     rows = cli.thread_rows(conn, item_id)
     if not rows:
         raise QueueError(f"no item #{item_id}")

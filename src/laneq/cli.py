@@ -36,7 +36,9 @@ BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
             lease_until TEXT,
             requeue_count INTEGER NOT NULL DEFAULT 0,
             parent_id INTEGER REFERENCES directives(id),
-            lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}'
+            lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}',
+            not_before TEXT,
+            blocked_by TEXT
         )"""
 SCHEMA_MIGRATIONS = {
     "taken_by": "ALTER TABLE directives ADD COLUMN taken_by TEXT",
@@ -44,6 +46,8 @@ SCHEMA_MIGRATIONS = {
     "requeue_count": "ALTER TABLE directives ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0",
     "parent_id": "ALTER TABLE directives ADD COLUMN parent_id INTEGER REFERENCES directives(id)",
     "lane": f"ALTER TABLE directives ADD COLUMN lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}'",
+    "not_before": "ALTER TABLE directives ADD COLUMN not_before TEXT",
+    "blocked_by": "ALTER TABLE directives ADD COLUMN blocked_by TEXT",
 }
 DATA_MIGRATIONS = [
     ("normalize_lane", "UPDATE directives SET lane=? WHERE lane IS NULL OR lane=''", (DEFAULT_LANE,)),
@@ -269,6 +273,62 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
     return len(rows)
 
 
+def parse_dependency_ids(value: str | None) -> list[int]:
+    if value is None or not value.strip():
+        return []
+    out: list[int] = []
+    for piece in value.replace(",", " ").split():
+        try:
+            dep_id = int(piece)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"invalid dependency id: {piece}") from None
+        if dep_id < 1:
+            raise argparse.ArgumentTypeError(f"invalid dependency id: {piece}")
+        out.append(dep_id)
+    return out
+
+
+def format_dependency_ids(ids: list[int]) -> str | None:
+    return ",".join(str(item) for item in ids) if ids else None
+
+
+def dependencies_satisfied(conn: sqlite3.Connection, blocked_by: str | None) -> bool:
+    for dep_id in parse_dependency_ids(blocked_by):
+        row = conn.execute("SELECT status FROM directives WHERE id=?", (dep_id,)).fetchone()
+        if row is None or row[0] not in TERMINAL_STATUSES:
+            return False
+    return True
+
+
+def reclaim_deferred(conn: sqlite3.Connection | None = None) -> int:
+    own_conn = conn is None
+    conn = conn or connect()
+    caller_had_transaction = conn.in_transaction
+    now = utc_now()
+    if own_conn:
+        conn.execute("BEGIN IMMEDIATE")
+    rows = conn.execute(
+        "SELECT id, not_before, blocked_by FROM directives WHERE status='deferred' ORDER BY priority ASC, id ASC"
+    ).fetchall()
+    ready: list[int] = []
+    for item_id, not_before, blocked_by in rows:
+        time_ready = not_before is None or not_before <= now
+        deps_ready = dependencies_satisfied(conn, blocked_by)
+        if time_ready and deps_ready:
+            ready.append(int(item_id))
+    for item_id in ready:
+        conn.execute(
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "not_before=NULL, blocked_by=NULL WHERE id=?",
+            (item_id,),
+        )
+    if own_conn:
+        conn.execute("COMMIT")
+    elif ready and not caller_had_transaction:
+        conn.commit()
+    return len(ready)
+
+
 def parent_exists(conn: sqlite3.Connection, parent_id: int | None) -> bool:
     if parent_id is None:
         return True
@@ -420,6 +480,7 @@ def cmd_show(args: argparse.Namespace) -> int:
         f"#{result['id']} [{result['priority']}] {result['status']} lane={result['lane']} "
         f"parent={parent} taken_by={result['taken_by'] or '-'} "
         f"lease_until={result['lease_until'] or '-'} requeues={result['requeue_count']} "
+        f"not_before={result['not_before'] or '-'} blocked_by={result['blocked_by'] or '-'} "
         f"created={result['created_at'] or '-'} taken={result['taken_at'] or '-'} done={result['done_at'] or '-'}"
     )
     print(result["body"])
@@ -444,7 +505,9 @@ def cmd_list(args: argparse.Namespace) -> int:
             consumer = f" by={row['taken_by']}" if row["taken_by"] else ""
             lease = f" lease={row['lease_until']}" if row["lease_until"] else ""
             requeue = f" requeues={row['requeue_count']}" if row["requeue_count"] else ""
-            detail = f"{lane_detail}{consumer}{lease}{requeue}"
+            not_before = f" not_before={row['not_before']}" if row.get("not_before") else ""
+            blocked_by = f" blocked_by={row['blocked_by']}" if row.get("blocked_by") else ""
+            detail = f"{lane_detail}{consumer}{lease}{requeue}{not_before}{blocked_by}"
         print(f"#{row['id']:<4} {row['priority']}{flag}{detail}  {row['summary']}")
     return 0
 
@@ -490,6 +553,24 @@ def cmd_reap(args: argparse.Namespace) -> int:
         reclaim_expired_leases(quiet=False)
     else:
         reap_stale(args.stale_seconds)
+    return 0
+
+
+def cmd_defer(args: argparse.Namespace) -> int:
+    from laneq import core
+
+    try:
+        result = core.defer(args.id, until=args.until, delay=args.delay, blocked_by=args.blocked_by)
+    except (argparse.ArgumentTypeError, core.QueueError) as error:
+        print(f"laneq: {error}", file=sys.stderr)
+        return 1
+    details = []
+    if result["not_before"]:
+        details.append(f"not_before={result['not_before']}")
+    if result["blocked_by"]:
+        details.append(f"blocked_by={result['blocked_by']}")
+    suffix = " " + " ".join(details) if details else ""
+    print(f"#{result['id']} -> deferred{suffix}")
     return 0
 
 
@@ -626,6 +707,13 @@ def build_parser() -> argparse.ArgumentParser:
     requeue = sub.add_parser("requeue")
     requeue.add_argument("id", type=int)
     requeue.set_defaults(fn=cmd_requeue)
+
+    defer = sub.add_parser("defer")
+    defer.add_argument("id", type=int)
+    defer.add_argument("--until")
+    defer.add_argument("--for", dest="delay")
+    defer.add_argument("--blocked-by", action="append", default=[])
+    defer.set_defaults(fn=cmd_defer)
 
     drop = sub.add_parser("drop")
     drop.add_argument("id", type=int)

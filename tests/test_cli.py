@@ -279,7 +279,7 @@ def test_migration_adds_v2_columns_to_legacy_database(tmp_path: Path) -> None:
 
     assert run_q(db, "list").stdout == "#1    P1  legacy\n"
     cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
-    assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane"} <= cols
+    assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane", "not_before", "blocked_by"} <= cols
     assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
     backups = backup_files(db)
     assert len(backups) == 1
@@ -366,7 +366,7 @@ def test_migration_from_intermediate_schema_adds_remaining_columns(tmp_path: Pat
     assert run_q(db, "migrate").returncode == 0
 
     cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
-    assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane"} <= cols
+    assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane", "not_before", "blocked_by"} <= cols
     assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
 
 
@@ -441,6 +441,76 @@ def test_lanes_isolate_next_peek_and_list(tmp_path: Path) -> None:
     assert "default work" not in run_q(db, "list", "--lane", "matchpoint").stdout
     assert run_q(db, "next", "--lane", "matchpoint").stdout == "matchpoint work"
     assert run_q(db, "next").stdout == "default work"
+
+
+def test_defer_until_keeps_future_work_out_of_next(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P0", "-b", "future")
+    run_q(db, "push", "-p", "P1", "-b", "ready")
+
+    deferred = run_q(db, "defer", "1", "--until", "2999-01-01T00:00:00Z")
+
+    assert deferred.returncode == 0
+    assert "#1 -> deferred not_before=2999-01-01T00:00:00Z" in deferred.stdout
+    assert run_q(db, "peek").stdout == "#2 [P1]\nready\n"
+    assert run_q(db, "next").stdout == "ready"
+    all_rows = run_q(db, "list", "--all").stdout
+    assert "#1" in all_rows
+    assert "P0 <deferred> not_before=2999-01-01T00:00:00Z" in all_rows
+    assert rows(db, "SELECT status,not_before FROM directives WHERE id=1") == [("deferred", "2999-01-01T00:00:00Z")]
+
+
+def test_defer_for_past_duration_reclaims_on_next_operation(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P0", "-b", "soon")
+
+    assert run_q(db, "defer", "1", "--for", "1").returncode == 0
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET not_before='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+
+    assert run_q(db, "next").stdout == "soon"
+    assert rows(db, "SELECT status,not_before FROM directives WHERE id=1") == [("taken", None)]
+
+
+def test_defer_blocked_by_dependency_releases_after_terminal_status(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-p", "P0", "-b", "dependency")
+    run_q(db, "push", "-p", "P0", "-b", "blocked child")
+    run_q(db, "push", "-p", "P1", "-b", "fallback")
+
+    deferred = run_q(db, "defer", "2", "--blocked-by", "1")
+
+    assert deferred.returncode == 0
+    assert "#2 -> deferred blocked_by=1" in deferred.stdout
+    assert run_q(db, "next").stdout == "dependency"
+    assert run_q(db, "next").stdout == "fallback"
+
+    run_q(db, "done", "1")
+    assert run_q(db, "next").stdout == "blocked child"
+    assert rows(db, "SELECT id,status,blocked_by FROM directives ORDER BY id") == [
+        (1, "done", None),
+        (2, "taken", None),
+        (3, "taken", None),
+    ]
+
+
+def test_defer_rejects_invalid_or_missing_dependencies(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-b", "body")
+
+    self_dep = run_q(db, "defer", "1", "--blocked-by", "1")
+    assert self_dep.returncode == 1
+    assert "cannot be blocked by itself" in self_dep.stderr
+
+    missing = run_q(db, "defer", "1", "--blocked-by", "99")
+    assert missing.returncode == 1
+    assert "no dependency #99" in missing.stderr
+
+    no_gate = run_q(db, "defer", "1")
+    assert no_gate.returncode == 1
+    assert "defer requires --until, --for, or --blocked-by" in no_gate.stderr
 
 
 def test_threading_parent_show_list_and_status(tmp_path: Path) -> None:
