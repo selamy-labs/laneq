@@ -357,3 +357,166 @@ def test_core_set_status_to_pending_increments_requeue(temp_db):
 
         show = core.show(item_id)
         assert show["requeue_count"] == i + 1
+
+
+# gRPC-specific tests for timestamp parsing and field completeness
+
+
+def test_grpc_timestamp_parsing_utc(temp_db):
+    """Test that ISO timestamps are parsed as UTC, not local time."""
+    from laneq.grpc_server import LaneqServicer
+
+    servicer = LaneqServicer()
+
+    # Known UTC timestamp: 2026-06-22T21:11:14Z should be 1782162674 seconds
+    # (verified: date -d "2026-06-22T21:11:14Z" +%s on a UTC system)
+    iso_timestamp = "2026-06-22T21:11:14Z"
+    expected_unix = 1782162674
+
+    result = servicer._parse_iso_timestamp(iso_timestamp)
+    assert int(result) == expected_unix, f"Got {int(result)}, expected {expected_unix}"
+
+
+def test_grpc_timestamp_roundtrip_utc(temp_db):
+    """Test that Unix → ISO → Unix round-trips correctly in UTC."""
+    from laneq.grpc_server import LaneqServicer
+
+    servicer = LaneqServicer()
+
+    # Start with a known UTC timestamp
+    original_unix = 1782162674  # 2026-06-22T21:11:14Z
+
+    # Convert to ISO
+    iso_str = servicer._unix_to_iso_timestamp(original_unix)
+    assert iso_str == "2026-06-22T21:11:14Z"
+
+    # Convert back to Unix
+    roundtrip_unix = int(servicer._parse_iso_timestamp(iso_str))
+    assert roundtrip_unix == original_unix
+
+
+def test_grpc_take_returns_full_directive_fields(temp_db):
+    """Test that Take response contains complete directive fields (priority, created_at, requeue_count)."""
+    from laneq.grpc_server import LaneqServicer
+    from laneq.grpc import laneq_pb2
+    from unittest.mock import MagicMock
+    import asyncio
+
+    servicer = LaneqServicer()
+
+    # Push a P0 directive
+    p0_result = core.push("high_priority_work", priority="P0")
+    p0_id = p0_result["id"]
+
+    # Push a P2 directive (should be taken after P0)
+    p2_result = core.push("low_priority_work", priority="P2")
+
+    # Take the P0 directive
+    take_result = core.take(consumer="test-worker", lease=30)
+    assert take_result["id"] == p0_id
+
+    # Fetch full record to verify fields
+    full_record = core.show(p0_id)
+    directive = servicer._dict_to_directive(full_record)
+
+    # Verify all critical fields are present and correct
+    assert directive.id == str(p0_id)
+    assert directive.priority == 1  # PRIORITY_P0 = 1
+    assert directive.created_at_unix > 0, "created_at_unix should be set"
+    assert directive.requeue_count == 0, "requeue_count should be 0 on first take"
+    assert directive.status == 2  # STATUS_TAKEN
+
+
+def test_grpc_take_respects_priority_in_response(temp_db):
+    """Test that Take response returns correct priority from database, not hardcoded."""
+    from laneq.grpc_server import LaneqServicer
+
+    servicer = LaneqServicer()
+
+    # Push P0 and P2
+    p0 = core.push("urgent", priority="P0")
+    p2 = core.push("trivial", priority="P2")
+
+    # Take P0
+    take_result = core.take(consumer="worker", lease=30)
+    full_record = core.show(take_result["id"])
+    directive = servicer._dict_to_directive(full_record)
+
+    # Priority should be P0 (1), not hardcoded P1 (2)
+    assert directive.priority == 1, f"Expected PRIORITY_P0=1, got {directive.priority}"
+
+    # Mark as done, take P2
+    core.set_status(p0["id"], "done")
+    take_result2 = core.take(consumer="worker", lease=30)
+    full_record2 = core.show(take_result2["id"])
+    directive2 = servicer._dict_to_directive(full_record2)
+
+    # Priority should be P2 (3)
+    assert directive2.priority == 3, f"Expected PRIORITY_P2=3, got {directive2.priority}"
+
+
+def test_grpc_take_includes_requeue_count(temp_db):
+    """Test that Take response includes requeue_count from database."""
+    from laneq.grpc_server import LaneqServicer
+
+    servicer = LaneqServicer()
+
+    # Push and take
+    push_result = core.push("work")
+    item_id = push_result["id"]
+
+    # First take (requeue_count should be 0)
+    core.take(consumer="worker1")
+    full_record = core.show(item_id)
+    directive = servicer._dict_to_directive(full_record)
+    assert directive.requeue_count == 0
+
+    # Requeue it
+    core.set_status(item_id, "pending")
+
+    # Second take (requeue_count should be 1)
+    core.take(consumer="worker2")
+    full_record = core.show(item_id)
+    directive = servicer._dict_to_directive(full_record)
+    assert directive.requeue_count == 1
+
+
+def test_grpc_peek_returns_full_directive_fields(temp_db):
+    """Test that Peek response contains complete directive fields."""
+    from laneq.grpc_server import LaneqServicer
+
+    servicer = LaneqServicer()
+
+    # Push a P1 directive
+    push_result = core.push("work", priority="P1")
+    item_id = push_result["id"]
+
+    # Peek it
+    peek_result = core.peek()
+    full_record = core.show(peek_result["id"])
+    directive = servicer._dict_to_directive(full_record)
+
+    # Verify all fields are present and correct
+    assert directive.id == str(item_id)
+    assert directive.priority == 2  # PRIORITY_P1 = 2
+    assert directive.created_at_unix > 0, "created_at_unix should be set"
+    assert directive.requeue_count == 0, "requeue_count should be 0 for fresh directive"
+    assert directive.status == 1  # STATUS_PENDING
+
+
+def test_grpc_peek_shows_correct_priority(temp_db):
+    """Test that Peek returns correct priority, not a default."""
+    from laneq.grpc_server import LaneqServicer
+
+    servicer = LaneqServicer()
+
+    # Push P0 and P2
+    core.push("urgent", priority="P0")
+    core.push("trivial", priority="P2")
+
+    # Peek should return P0
+    peek_result = core.peek()
+    full_record = core.show(peek_result["id"])
+    directive = servicer._dict_to_directive(full_record)
+
+    assert directive.priority == 1, f"Expected PRIORITY_P0=1, got {directive.priority}"

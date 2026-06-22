@@ -7,12 +7,14 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
 import grpc
 
 from laneq.grpc import laneq_pb2, laneq_pb2_grpc
 from laneq.grpc_server import LaneqServicer
 
 
+@pytest.mark.asyncio
 async def test_integration():
     """Test the gRPC server with a real channel."""
     # Setup temp database

@@ -8,6 +8,7 @@ and empty take/peek returns (directive unset in response).
 import argparse
 import sys
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 import grpc
@@ -101,10 +102,10 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         if not iso_str:
             return 0.0
         try:
-            # Remove 'Z' suffix and parse
+            # Parse ISO format with Z suffix; timezone.utc ensures UTC interpretation
             dt_str = iso_str.rstrip("Z")
-            dt_tuple = time.strptime(dt_str, "%Y-%m-%dT%H:%M:%S")
-            return float(time.mktime(dt_tuple))
+            dt = datetime.strptime(dt_str, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            return dt.timestamp()
         except (ValueError, TypeError):
             return 0.0
 
@@ -147,13 +148,12 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.lane = lane
 
             if result:
-                # Convert the result dict to a minimal directive (only id and body for taken directives)
-                response.directive.id = str(result["id"])
-                response.directive.body = result["body"]
-                response.directive.lane = lane
+                # Fetch the full directive record (core.take() returns only {id, body})
+                full_record = core.show(result["id"])
+                # Use the full converter so all fields are present and correct
+                response.directive.CopyFrom(self._dict_to_directive(full_record))
+                # Update taken_by since the record may not have that field set yet
                 response.directive.taken_by = consumer
-                response.directive.status = self._status_to_proto("taken")
-                response.directive.priority = 2  # Default to P1
             # If result is None, response.directive is unset (empty Directive)
 
             return response
@@ -170,11 +170,10 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             response = laneq_pb2.PeekResponse()
             if result:
-                response.directive.id = str(result["id"])
-                response.directive.body = result["body"]
-                response.directive.lane = result["lane"]
-                response.directive.priority = self._priority_to_proto(result["priority"])
-                response.directive.status = self._status_to_proto("pending")
+                # Fetch the full directive record (core.peek() returns only {id, priority, lane, body})
+                full_record = core.show(result["id"])
+                # Use the full converter so all fields are present and correct
+                response.directive.CopyFrom(self._dict_to_directive(full_record))
             # If result is None, response.directive is unset
 
             return response
