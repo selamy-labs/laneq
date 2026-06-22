@@ -397,7 +397,10 @@ def unpark(item_id: int) -> dict[str, Any]:
     """Remove a directive from parked status (returns to pending)."""
     conn = cli.connect()
     cur = conn.execute(
-        "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL WHERE id=? AND status=?",
+        (
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, "
+            "lease_until=NULL WHERE id=? AND status=?"
+        ),
         (item_id, PARKED_STATUS),
     )
     conn.commit()

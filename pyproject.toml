@@ -80,6 +80,11 @@ skip_covered = true
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = [
+  "src/laneq/grpc/laneq_pb2.py",
+  "src/laneq/grpc/laneq_pb2_grpc.py",
+  "src/laneq/grpc/laneq_pb2.pyi",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "C90", "RUF"]

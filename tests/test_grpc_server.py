@@ -57,7 +57,7 @@ def test_core_empty_take(temp_db):
 def test_core_reprioritize(temp_db):
     """Test changing priority of a directive."""
     # Push two directives
-    push1 = core.push("first", priority="P1")
+    core.push("first", priority="P1")
     push2 = core.push("second", priority="P2")
 
     # Reprioritize second to P0
@@ -126,7 +126,7 @@ def test_core_requeue_count_on_requeue(temp_db):
     push_result = core.push("work")
     item_id = push_result["id"]
 
-    take_result = core.take(consumer="worker")
+    core.take(consumer="worker")
 
     # Show before requeue
     show = core.show(item_id)
@@ -140,7 +140,7 @@ def test_core_requeue_count_on_requeue(temp_db):
     assert show["requeue_count"] == 1
 
     # Take again
-    take_result = core.take(consumer="worker")
+    core.take(consumer="worker")
 
     # Requeue again
     core.set_status(item_id, "pending")
@@ -194,8 +194,7 @@ def test_core_touch_lease(temp_db):
     push_result = core.push("work")
     item_id = push_result["id"]
 
-    take_result = core.take(consumer="worker", lease=10)
-    initial_lease = take_result  # We don't have lease_until in take_result
+    core.take(consumer="worker", lease=10)
 
     # Touch to renew
     touch_result = core.touch(item_id, lease=30)
@@ -226,8 +225,8 @@ def test_core_thread_status(temp_db):
     parent = core.push("parent_work")
 
     # Push children
-    child1 = core.push("child1", parent=parent["id"])
-    child2 = core.push("child2", parent=parent["id"])
+    core.push("child1", parent=parent["id"])
+    core.push("child2", parent=parent["id"])
 
     # Check thread status
     thread = core.thread_status(parent["id"])
@@ -244,7 +243,7 @@ def test_core_reap(temp_db):
 
     # Push and take with very short lease
     push_result = core.push("work")
-    item_id = push_result["id"]
+    push_result["id"]
 
     core.take(consumer="worker", lease=1)
 
@@ -338,7 +337,7 @@ def test_core_parked_excluded_from_reap(temp_db):
     time.sleep(0.2)
 
     # Reap expired leases
-    reap_result = core.reap(expired_leases=True)
+    core.reap(expired_leases=True)
 
     # Should not have reaped the parked item
     show = core.show(item_id)
@@ -397,10 +396,8 @@ def test_grpc_timestamp_roundtrip_utc(temp_db):
 
 def test_grpc_take_returns_full_directive_fields(temp_db):
     """Test that Take response contains complete directive fields (priority, created_at, requeue_count)."""
+
     from laneq.grpc_server import LaneqServicer
-    from laneq.grpc import laneq_pb2
-    from unittest.mock import MagicMock
-    import asyncio
 
     servicer = LaneqServicer()
 
@@ -409,7 +406,7 @@ def test_grpc_take_returns_full_directive_fields(temp_db):
     p0_id = p0_result["id"]
 
     # Push a P2 directive (should be taken after P0)
-    p2_result = core.push("low_priority_work", priority="P2")
+    core.push("low_priority_work", priority="P2")
 
     # Take the P0 directive
     take_result = core.take(consumer="test-worker", lease=30)
@@ -435,7 +432,7 @@ def test_grpc_take_respects_priority_in_response(temp_db):
 
     # Push P0 and P2
     p0 = core.push("urgent", priority="P0")
-    p2 = core.push("trivial", priority="P2")
+    core.push("trivial", priority="P2")
 
     # Take P0
     take_result = core.take(consumer="worker", lease=30)

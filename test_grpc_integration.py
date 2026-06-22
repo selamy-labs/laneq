@@ -7,8 +7,8 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
 import grpc
+import pytest
 
 from laneq.grpc import laneq_pb2, laneq_pb2_grpc
 from laneq.grpc_server import LaneqServicer

@@ -9,8 +9,8 @@ import os
 import tempfile
 from pathlib import Path
 
-import pytest
 import grpc
+import pytest
 
 from laneq import core
 from laneq.core import NotFoundError, PreconditionError, QueueError
