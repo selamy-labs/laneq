@@ -61,9 +61,11 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         directive.priority = self._priority_to_proto(d.get("priority", "P1"))
         directive.body = d.get("body", "")
         directive.status = self._status_to_proto(d.get("status", "pending"))
-        directive.lane = d.get("lane", "default")
-        directive.taken_by = d.get("taken_by", "")
-        directive.parent_id = str(d.get("parent", "")) if d.get("parent") else ""
+        directive.lane = d.get("lane", "default") or "default"
+        directive.taken_by = d.get("taken_by") or ""
+        parent = d.get("parent")
+        if parent is not None:
+            directive.parent_id = str(parent)
         directive.requeue_count = d.get("requeue_count", 0)
 
         # Convert timestamps from ISO format to Unix SECONDS
