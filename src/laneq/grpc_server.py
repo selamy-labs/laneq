@@ -12,14 +12,22 @@ from datetime import datetime, timezone
 from typing import Any
 
 import grpc
-from grpc import aio
 
 from laneq import core
+from laneq.core import NotFoundError, PreconditionError, QueueError
 from laneq.grpc import laneq_pb2, laneq_pb2_grpc
 
 
 class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
     """gRPC service implementation mapping proto RPCs to laneq core functions."""
+
+    def _queue_error_code(self, exc: QueueError) -> grpc.StatusCode:
+        """Map QueueError subclass to gRPC status code."""
+        if isinstance(exc, NotFoundError):
+            return grpc.StatusCode.NOT_FOUND
+        if isinstance(exc, PreconditionError):
+            return grpc.StatusCode.FAILED_PRECONDITION
+        return grpc.StatusCode.INVALID_ARGUMENT
 
     def _priority_to_proto(self, priority_str: str) -> int:
         """Convert priority string (P0/P1/P2) to proto enum value."""
@@ -129,7 +137,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.summary = result.get("summary", "")
             return response
         except core.QueueError as e:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            await context.abort(self._queue_error_code(e), str(e))
 
     async def Take(
         self, request: laneq_pb2.TakeRequest, context: grpc.aio.ServicerContext
@@ -158,7 +166,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             return response
         except core.QueueError as e:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            await context.abort(self._queue_error_code(e), str(e))
 
     async def Peek(
         self, request: laneq_pb2.PeekRequest, context: grpc.aio.ServicerContext
@@ -178,7 +186,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             return response
         except core.QueueError as e:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            await context.abort(self._queue_error_code(e), str(e))
 
     async def Show(
         self, request: laneq_pb2.ShowRequest, context: grpc.aio.ServicerContext
@@ -200,7 +208,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
                 response.thread.append(ti)
 
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Listing(
@@ -219,7 +229,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
                 response.directives.append(directive)
 
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Reprioritize(
@@ -235,7 +247,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.id = str(result["id"])
             response.priority = request.priority
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def SetStatus(
@@ -251,7 +265,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.id = str(result["id"])
             response.status = request.status
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Defer(
@@ -284,7 +300,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             response.blocked_by.extend(request.blocked_by or [])
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Touch(
@@ -304,7 +322,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
                 response.lease_until_unix = int(self._parse_iso_timestamp(result["lease_until"]))
 
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Reap(
@@ -320,7 +340,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.detail = f"Reclaimed {result['reclaimed']} directives"
             return response
         except core.QueueError as e:
-            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+            await context.abort(self._queue_error_code(e), str(e))
 
     async def Stats(
         self, request: laneq_pb2.StatsRequest, context: grpc.aio.ServicerContext
@@ -347,7 +367,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             return response
         except core.QueueError as e:
-            await context.abort(grpc.StatusCode.INTERNAL, str(e))
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))  # Stats shouldn't fail; use INTERNAL
 
     async def ThreadStatus(
         self, request: laneq_pb2.ThreadStatusRequest, context: grpc.aio.ServicerContext
@@ -371,7 +391,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
                 response.open_items.append(ti)
 
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Park(
@@ -386,7 +408,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.id = str(result["id"])
             response.status = self._status_to_proto(result["status"])
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     async def Unpark(
@@ -401,7 +425,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.id = str(result["id"])
             response.status = self._status_to_proto(result["status"])
             return response
-        except (core.QueueError, ValueError) as e:
+        except core.QueueError as e:
+            await context.abort(self._queue_error_code(e), str(e))
+        except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
     def _unix_to_iso_timestamp(self, unix_seconds: int) -> str:
