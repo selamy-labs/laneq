@@ -28,6 +28,11 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
+grpc = [
+  "grpcio>=1.48",
+  "grpcio-tools>=1.48",
+  "protobuf>=3.20",
+]
 mcp = [
   "mcp>=1.2",
 ]
@@ -41,8 +46,12 @@ otel = [
 ]
 test = [
   "coverage[toml]>=7.6",
+  "grpcio>=1.48",
+  "grpcio-tools>=1.48",
   "mcp>=1.2",
+  "protobuf>=3.20",
   "pytest>=8.3",
+  "pytest-asyncio>=0.21",
   "ruff>=0.8",
 ]
 
@@ -50,6 +59,7 @@ test = [
 laneq = "laneq.cli:main"
 codex-q = "laneq.cli:main"
 laneq-mcp = "laneq.mcp_server:main"
+laneq-grpc = "laneq.grpc_server:main"
 
 [project.urls]
 Homepage = "https://github.com/selamy-labs/laneq"

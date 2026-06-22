@@ -131,7 +131,8 @@ def test_peek_show_list_reprioritize_requeue_and_drop(tmp_path: Path) -> None:
     assert run_q(db, "drop", "1").stdout == "#1 -> dropped\n"
     all_rows = run_q(db, "list", "--all").stdout
     assert "#1" in all_rows
-    assert "P0 <dropped>  low" in all_rows
+    # After requeue (setting to pending), requeue_count is incremented to 1
+    assert "P0 <dropped> requeues=1  low" in all_rows
 
 
 def test_push_from_file_and_stdin(tmp_path: Path) -> None:

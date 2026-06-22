@@ -20,6 +20,7 @@ DEFAULT_LANE = cli.DEFAULT_LANE
 DEFAULT_LEASE_SECONDS = cli.DEFAULT_LEASE_SECONDS
 DEFAULT_REAP_STALE_SECONDS = cli.DEFAULT_REAP_STALE_SECONDS
 TERMINAL_STATUSES = cli.TERMINAL_STATUSES
+PARKED_STATUS = cli.PARKED_STATUS
 
 
 class QueueError(Exception):
@@ -229,7 +230,7 @@ def set_status(item_id: int, status: str) -> dict[str, Any]:
     if status == "pending":
         cur = conn.execute(
             "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
-            "not_before=NULL, blocked_by=NULL WHERE id=?",
+            "not_before=NULL, blocked_by=NULL, requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
     elif status == "done":
@@ -361,3 +362,29 @@ def thread_status(item_id: int) -> dict[str, Any]:
             for r in open_rows
         ],
     }
+
+
+def park(item_id: int) -> dict[str, Any]:
+    """Move a taken directive into parked status (durable hold, excluded from claim/peek/reap)."""
+    conn = cli.connect()
+    cur = conn.execute(
+        "UPDATE directives SET status=? WHERE id=? AND status='taken'",
+        (PARKED_STATUS, item_id),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise QueueError(f"no taken item #{item_id}")
+    return {"id": item_id, "status": PARKED_STATUS}
+
+
+def unpark(item_id: int) -> dict[str, Any]:
+    """Remove a directive from parked status (returns to pending)."""
+    conn = cli.connect()
+    cur = conn.execute(
+        "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL WHERE id=? AND status=?",
+        (item_id, PARKED_STATUS),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        raise QueueError(f"no parked item #{item_id}")
+    return {"id": item_id, "status": "pending"}
