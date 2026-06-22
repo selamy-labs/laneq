@@ -334,6 +334,7 @@ def test_core_parked_excluded_from_reap(temp_db):
 
     # Wait for lease to expire
     import time
+
     time.sleep(0.2)
 
     # Reap expired leases

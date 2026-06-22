@@ -117,9 +117,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         except (ValueError, TypeError):
             return 0.0
 
-    async def Push(
-        self, request: laneq_pb2.PushRequest, context: grpc.aio.ServicerContext
-    ) -> laneq_pb2.PushResponse:
+    async def Push(self, request: laneq_pb2.PushRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.PushResponse:
         """Enqueue a new directive."""
         try:
             priority = self._priority_from_proto(request.priority)
@@ -139,9 +137,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         except core.QueueError as e:
             await context.abort(self._queue_error_code(e), str(e))
 
-    async def Take(
-        self, request: laneq_pb2.TakeRequest, context: grpc.aio.ServicerContext
-    ) -> laneq_pb2.TakeResponse:
+    async def Take(self, request: laneq_pb2.TakeRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.TakeResponse:
         """Claim the next eligible directive."""
         try:
             consumer = request.consumer or "-"
@@ -168,9 +164,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         except core.QueueError as e:
             await context.abort(self._queue_error_code(e), str(e))
 
-    async def Peek(
-        self, request: laneq_pb2.PeekRequest, context: grpc.aio.ServicerContext
-    ) -> laneq_pb2.PeekResponse:
+    async def Peek(self, request: laneq_pb2.PeekRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.PeekResponse:
         """Query the next eligible directive without claiming."""
         try:
             lane = request.lane or "default"
@@ -188,9 +182,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         except core.QueueError as e:
             await context.abort(self._queue_error_code(e), str(e))
 
-    async def Show(
-        self, request: laneq_pb2.ShowRequest, context: grpc.aio.ServicerContext
-    ) -> laneq_pb2.ShowResponse:
+    async def Show(self, request: laneq_pb2.ShowRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.ShowResponse:
         """Retrieve full details of a directive by ID."""
         try:
             item_id = int(request.id)
@@ -327,9 +319,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
-    async def Reap(
-        self, request: laneq_pb2.ReapRequest, context: grpc.aio.ServicerContext
-    ) -> laneq_pb2.ReapResponse:
+    async def Reap(self, request: laneq_pb2.ReapRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.ReapResponse:
         """Reclaim expired leases and stale deferred directives."""
         try:
             result = core.reap(expired_leases=request.expired_leases, stale_seconds=request.stale_seconds or 21600)
@@ -396,9 +386,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         except ValueError as e:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
-    async def Park(
-        self, request: laneq_pb2.ParkRequest, context: grpc.aio.ServicerContext
-    ) -> laneq_pb2.ParkResponse:
+    async def Park(self, request: laneq_pb2.ParkRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.ParkResponse:
         """Move a claimed directive into parked status (durable hold)."""
         try:
             item_id = int(request.id)
@@ -455,9 +443,7 @@ async def serve(host: str = "localhost", port: int = 50051):
 def main():
     """Entry point for the laneq-grpc command."""
     parser = argparse.ArgumentParser(description="gRPC server for laneq queue operations")
-    parser.add_argument(
-        "--addr", default="localhost:50051", help="Listen address (default: localhost:50051)"
-    )
+    parser.add_argument("--addr", default="localhost:50051", help="Listen address (default: localhost:50051)")
     args = parser.parse_args()
 
     host, port = args.addr.rsplit(":", 1)

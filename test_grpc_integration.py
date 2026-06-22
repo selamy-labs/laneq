@@ -52,34 +52,26 @@ async def test_integration():
 
                 # Test Take
                 print("Testing Take...")
-                take_response = await stub.Take(
-                    laneq_pb2.TakeRequest(consumer="test-worker", lease_duration_ms=30000)
-                )
+                take_response = await stub.Take(laneq_pb2.TakeRequest(consumer="test-worker", lease_duration_ms=30000))
                 print(f"  Took directive #{take_response.directive.id}")
                 assert take_response.directive.status == laneq_pb2.STATUS_TAKEN
                 assert take_response.directive.taken_by == "test-worker"
 
                 # Test Park
                 print("Testing Park...")
-                park_response = await stub.Park(
-                    laneq_pb2.ParkRequest(id=push_response.id, consumer="test-worker")
-                )
+                park_response = await stub.Park(laneq_pb2.ParkRequest(id=push_response.id, consumer="test-worker"))
                 print(f"  Parked directive #{park_response.id}")
                 assert park_response.status == laneq_pb2.STATUS_PARKED
 
                 # Test Unpark
                 print("Testing Unpark...")
-                unpark_response = await stub.Unpark(
-                    laneq_pb2.UnparkRequest(id=push_response.id)
-                )
+                unpark_response = await stub.Unpark(laneq_pb2.UnparkRequest(id=push_response.id))
                 print(f"  Unparked directive #{unpark_response.id}")
                 assert unpark_response.status == laneq_pb2.STATUS_PENDING
 
                 # Test Show
                 print("Testing Show...")
-                show_response = await stub.Show(
-                    laneq_pb2.ShowRequest(id=push_response.id)
-                )
+                show_response = await stub.Show(laneq_pb2.ShowRequest(id=push_response.id))
                 print(f"  Show returned full directive: {show_response.directive.id}")
                 assert show_response.directive.created_at_unix > 0
 
