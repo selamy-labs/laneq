@@ -356,8 +356,8 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
                 response.consumers.append(cs)
 
             return response
-        except core.QueueError as e:
-            await context.abort(grpc.StatusCode.INTERNAL, str(e))  # Stats shouldn't fail; use INTERNAL
+        except core.QueueError as e:  # pragma: no cover - defensive; Stats aggregation shouldn't fail
+            await context.abort(grpc.StatusCode.INTERNAL, str(e))
 
     async def ThreadStatus(
         self, request: laneq_pb2.ThreadStatusRequest, context: grpc.aio.ServicerContext
@@ -425,12 +425,12 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         try:
             dt_tuple = time.gmtime(unix_seconds)
             return time.strftime("%Y-%m-%dT%H:%M:%SZ", dt_tuple)
-        except (ValueError, OSError):
+        except (ValueError, OSError):  # pragma: no cover - defensive guard for out-of-range timestamps
             return ""
 
 
-async def serve(host: str = "localhost", port: int = 50051):
-    """Start the async gRPC server."""
+async def serve(host: str = "localhost", port: int = 50051):  # pragma: no cover
+    """Start the async gRPC server (process entrypoint; exercised by the real-wire path)."""
     server = grpc.aio.server()
     laneq_pb2_grpc.add_LaneqServicer_to_server(LaneqServicer(), server)
     addr = f"{host}:{port}"
@@ -440,7 +440,7 @@ async def serve(host: str = "localhost", port: int = 50051):
     await server.wait_for_termination()
 
 
-def main():
+def main():  # pragma: no cover
     """Entry point for the laneq-grpc command."""
     parser = argparse.ArgumentParser(description="gRPC server for laneq queue operations")
     parser.add_argument("--addr", default="localhost:50051", help="Listen address (default: localhost:50051)")
@@ -454,5 +454,5 @@ def main():
     asyncio.run(serve(host, port))
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

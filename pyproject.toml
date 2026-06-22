@@ -72,6 +72,11 @@ packages = ["src/laneq"]
 [tool.coverage.run]
 branch = true
 source = ["laneq"]
+omit = [
+  "src/laneq/grpc/laneq_pb2.py",
+  "src/laneq/grpc/laneq_pb2_grpc.py",
+  "src/laneq/grpc/laneq_pb2.pyi",
+]
 
 [tool.coverage.report]
 show_missing = true
