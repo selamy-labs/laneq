@@ -20,10 +20,19 @@ DEFAULT_LANE = cli.DEFAULT_LANE
 DEFAULT_LEASE_SECONDS = cli.DEFAULT_LEASE_SECONDS
 DEFAULT_REAP_STALE_SECONDS = cli.DEFAULT_REAP_STALE_SECONDS
 TERMINAL_STATUSES = cli.TERMINAL_STATUSES
+PARKED_STATUS = cli.PARKED_STATUS
 
 
 class QueueError(Exception):
     """A queue operation failed for an expected, user-facing reason."""
+
+
+class NotFoundError(QueueError):
+    """Item or dependency does not exist."""
+
+
+class PreconditionError(QueueError):
+    """Item exists but is in the wrong state for the operation."""
 
 
 def _priority_value(priority: str) -> int:
@@ -46,7 +55,7 @@ def push(
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
     if not cli.parent_exists(conn, parent):
-        raise QueueError(f"no parent #{parent}")
+        raise NotFoundError(f"no parent #{parent}")
     cur = conn.execute(
         "INSERT INTO directives(priority, body, status, created_at, parent_id, lane) VALUES(?, ?, 'pending', ?, ?, ?)",
         (priority_value, body, cli.utc_now(), parent, lane),
@@ -134,7 +143,7 @@ def show(item_id: int) -> dict[str, Any]:
         (item_id,),
     ).fetchone()
     if row is None:
-        raise QueueError(f"no item #{item_id}")
+        raise NotFoundError(f"no item #{item_id}")
     has_thread = bool(cli.ancestors(conn, item_id) or cli.descendants(conn, item_id))
     return {
         "id": int(row[0]),
@@ -217,7 +226,7 @@ def reprioritize(item_id: int, priority: str) -> dict[str, Any]:
     cur = conn.execute("UPDATE directives SET priority=? WHERE id=?", (priority_value, item_id))
     conn.commit()
     if cur.rowcount == 0:
-        raise QueueError(f"no item #{item_id}")
+        raise NotFoundError(f"no item #{item_id}")
     return {"id": item_id, "priority": priority}
 
 
@@ -229,7 +238,7 @@ def set_status(item_id: int, status: str) -> dict[str, Any]:
     if status == "pending":
         cur = conn.execute(
             "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
-            "not_before=NULL, blocked_by=NULL WHERE id=?",
+            "not_before=NULL, blocked_by=NULL, requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
     elif status == "done":
@@ -244,7 +253,7 @@ def set_status(item_id: int, status: str) -> dict[str, Any]:
         )
     conn.commit()
     if cur.rowcount == 0:
-        raise QueueError(f"no item #{item_id}")
+        raise NotFoundError(f"no item #{item_id}")
     return {"id": item_id, "status": status}
 
 
@@ -277,7 +286,7 @@ def defer(
     cli.reclaim_expired_leases(conn)
     for dep_id in dep_ids:
         if not cli.parent_exists(conn, dep_id):
-            raise QueueError(f"no dependency #{dep_id}")
+            raise NotFoundError(f"no dependency #{dep_id}")
     blocked_text = cli.format_dependency_ids(dep_ids)
     cur = conn.execute(
         "UPDATE directives SET status='deferred', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
@@ -286,7 +295,7 @@ def defer(
     )
     conn.commit()
     if cur.rowcount == 0:
-        raise QueueError(f"no item #{item_id}")
+        raise NotFoundError(f"no item #{item_id}")
     return {"id": item_id, "status": "deferred", "not_before": not_before, "blocked_by": blocked_text}
 
 
@@ -301,7 +310,11 @@ def touch(item_id: int, *, lease: str | int | None = None) -> dict[str, Any]:
     )
     conn.commit()
     if cur.rowcount == 0:
-        raise QueueError(f"no taken item #{item_id}")
+        # Check if item exists at all (NOT_FOUND) vs wrong state (FAILED_PRECONDITION)
+        existing = conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone()
+        if existing is None:
+            raise NotFoundError(f"no item #{item_id}")
+        raise PreconditionError(f"no taken item #{item_id}")
     lease_until = conn.execute("SELECT lease_until FROM directives WHERE id=?", (item_id,)).fetchone()[0]
     return {"id": item_id, "lease_until": lease_until}
 
@@ -343,7 +356,7 @@ def thread_status(item_id: int) -> dict[str, Any]:
     cli.reclaim_deferred(conn)
     rows = cli.thread_rows(conn, item_id)
     if not rows:
-        raise QueueError(f"no item #{item_id}")
+        raise NotFoundError(f"no item #{item_id}")
     open_rows = [r for r in rows if r[2] not in TERMINAL_STATUSES]
     return {
         "root": int(rows[0][0]),
@@ -361,3 +374,40 @@ def thread_status(item_id: int) -> dict[str, Any]:
             for r in open_rows
         ],
     }
+
+
+def park(item_id: int) -> dict[str, Any]:
+    """Move a taken directive into parked status (durable hold, excluded from claim/peek/reap)."""
+    conn = cli.connect()
+    cur = conn.execute(
+        "UPDATE directives SET status=? WHERE id=? AND status='taken'",
+        (PARKED_STATUS, item_id),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        # Check if item exists at all (NOT_FOUND) vs wrong state (FAILED_PRECONDITION)
+        existing = conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone()
+        if existing is None:
+            raise NotFoundError(f"no item #{item_id}")
+        raise PreconditionError(f"no taken item #{item_id}")
+    return {"id": item_id, "status": PARKED_STATUS}
+
+
+def unpark(item_id: int) -> dict[str, Any]:
+    """Remove a directive from parked status (returns to pending)."""
+    conn = cli.connect()
+    cur = conn.execute(
+        (
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, "
+            "lease_until=NULL WHERE id=? AND status=?"
+        ),
+        (item_id, PARKED_STATUS),
+    )
+    conn.commit()
+    if cur.rowcount == 0:
+        # Check if item exists at all (NOT_FOUND) vs wrong state (FAILED_PRECONDITION)
+        existing = conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone()
+        if existing is None:
+            raise NotFoundError(f"no item #{item_id}")
+        raise PreconditionError(f"no parked item #{item_id}")
+    return {"id": item_id, "status": "pending"}

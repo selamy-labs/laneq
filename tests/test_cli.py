@@ -131,7 +131,8 @@ def test_peek_show_list_reprioritize_requeue_and_drop(tmp_path: Path) -> None:
     assert run_q(db, "drop", "1").stdout == "#1 -> dropped\n"
     all_rows = run_q(db, "list", "--all").stdout
     assert "#1" in all_rows
-    assert "P0 <dropped>  low" in all_rows
+    # After requeue (setting to pending), requeue_count is incremented to 1
+    assert "P0 <dropped> requeues=1  low" in all_rows
 
 
 def test_push_from_file_and_stdin(tmp_path: Path) -> None:
@@ -537,13 +538,34 @@ def test_threading_parent_show_list_and_status(tmp_path: Path) -> None:
     assert run_q(db, "thread-status", "1").stdout == "thread #1 done total=3 open=0\n"
 
 
-def test_touch_missing_taken_item_reports_error(tmp_path: Path) -> None:
+def test_touch_missing_item_reports_error(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
 
     result = run_q(db, "touch", "404")
 
     assert result.returncode == 1
-    assert "no taken item #404" in result.stderr
+    assert "no item #404" in result.stderr
+
+
+def test_touch_not_taken_item_reports_error(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+
+    # Push an item but don't take it
+    push_result = run_q(db, "push", "-b", "test item")
+    assert push_result.returncode == 0
+
+    # Extract the item ID from the output: "queued #<id> [P1]: test item"
+    lines = push_result.stdout.strip().split("\n")
+    # The last line is the output from push
+    output_line = lines[-1]
+    # Format: "queued #1 [P1]: test item"
+    item_id = output_line.split("#")[1].split()[0]
+
+    # Try to touch it without taking it first
+    result = run_q(db, "touch", item_id)
+
+    assert result.returncode == 1
+    assert f"no taken item #{item_id}" in result.stderr
 
 
 def test_push_rejects_missing_parent_and_thread_status_missing_item(tmp_path: Path) -> None:

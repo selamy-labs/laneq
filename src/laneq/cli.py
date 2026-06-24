@@ -23,6 +23,7 @@ PRIORITIES = {"P0": 0, "P1": 1, "P2": 2}
 PRIORITY_NAMES = {value: key for key, value in PRIORITIES.items()}
 EMPTY_EXIT_CODE = 3
 TERMINAL_STATUSES = {"done", "dropped"}
+PARKED_STATUS = "parked"
 DEFAULT_BACKUP_RETENTION = int(os.environ.get("LANEQ_BACKUP_RETENTION", "5"))
 BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
