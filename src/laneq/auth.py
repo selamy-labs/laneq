@@ -65,3 +65,65 @@ def verify_grant(token, *, public_keys, audience, now):
         raise GrantError(f"grant audience mismatch: {aud!r} != {audience!r}")
 
     return claims
+
+
+class ReplayCache:
+    """Bounded TTL cache of seen proof nonces (anti-replay).
+
+    Sized to the proof freshness window: a nonce is remembered for ``ttl_seconds``
+    (which should be >= the verifier's skew window) and then pruned, so the cache
+    cannot grow without bound.
+    """
+
+    def __init__(self, ttl_seconds=60):
+        self._ttl = ttl_seconds
+        self._seen = {}  # nonce -> expiry unix timestamp
+
+    def check_and_add(self, nonce, now):
+        """Return True if the nonce is fresh (and record it); False if already seen."""
+        now_ts = now.timestamp()
+        self._seen = {n: exp for n, exp in self._seen.items() if exp > now_ts}
+        if nonce in self._seen:
+            return False
+        self._seen[nonce] = now_ts + self._ttl
+        return True
+
+
+def verify_proof(proof, *, client_key, audience, method, now, skew_seconds=30, replay_cache=None):
+    """Verify a per-request proof signed by the client's ``cnf`` key (anti-replay).
+
+    The proof binds a request to the client keypair the grant was issued for, and to
+    a single method/target/time/nonce so a captured grant or proof cannot be replayed.
+
+    Raises:
+        GrantError: bad/forged proof signature, wrong audience or method, timestamp
+            outside the skew window, missing nonce, or a replayed nonce. Fails closed.
+    """
+    try:
+        decoded = pyseto.decode([client_key], proof)
+    except Exception as exc:  # fail closed on any signature/format error
+        raise GrantError(f"proof signature verification failed: {exc}") from exc
+
+    try:
+        claims = json.loads(decoded.payload)
+    except (ValueError, TypeError) as exc:
+        raise GrantError("proof payload is not valid JSON") from exc
+    if not isinstance(claims, dict):
+        raise GrantError("proof payload is not a claims object")
+
+    if claims.get("aud") != audience:
+        raise GrantError("proof audience mismatch")
+    if claims.get("method") != method:
+        raise GrantError("proof method mismatch")
+
+    iat = claims.get("iat")
+    if iat is None or abs(now.timestamp() - iat) > skew_seconds:
+        raise GrantError("proof timestamp outside skew window")
+
+    nonce = claims.get("nonce")
+    if not nonce:
+        raise GrantError("proof is missing a nonce")
+    if replay_cache is not None and not replay_cache.check_and_add(nonce, now):
+        raise GrantError("proof nonce replay detected")
+
+    return claims
