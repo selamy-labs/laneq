@@ -431,7 +431,11 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
 async def serve(host: str = "localhost", port: int = 50051):  # pragma: no cover
     """Start the async gRPC server (process entrypoint; exercised by the real-wire path)."""
-    server = grpc.aio.server()
+    from laneq.grpc_auth import build_interceptor_from_env
+
+    auth_interceptor = build_interceptor_from_env()
+    interceptors = [auth_interceptor] if auth_interceptor is not None else []
+    server = grpc.aio.server(interceptors=interceptors)
     laneq_pb2_grpc.add_LaneqServicer_to_server(LaneqServicer(), server)
     addr = f"{host}:{port}"
     server.add_insecure_port(addr)

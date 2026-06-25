@@ -67,6 +67,20 @@ def verify_grant(token, *, public_keys, audience, now):
     return claims
 
 
+def public_key_from_cnf(cnf):
+    """Build a pyseto v4.public verify Key from a grant's ``cnf`` claim.
+
+    ``cnf`` is ``{"kid": ..., "key": <PEM Ed25519 public key>}``; raise GrantError if
+    it is missing or malformed (fail closed).
+    """
+    if not isinstance(cnf, dict) or "key" not in cnf:
+        raise GrantError("grant cnf is missing or malformed")
+    try:
+        return pyseto.Key.new(version=4, purpose="public", key=cnf["key"].encode())
+    except Exception as exc:
+        raise GrantError(f"grant cnf key is invalid: {exc}") from exc
+
+
 class ReplayCache:
     """Bounded TTL cache of seen proof nonces (anti-replay).
 
