@@ -9,12 +9,25 @@ This module is transport-agnostic (no gRPC): the gRPC interceptor wraps it.
 """
 
 import json
+from hmac import compare_digest
+from numbers import Real
 
 import pyseto
 
 
 class GrantError(Exception):
     """Raised when a PASETO grant fails verification (fail-closed)."""
+
+
+def _numeric_claim(claims, name, *, required):
+    value = claims.get(name)
+    if value is None:
+        if required:
+            raise GrantError(f"grant is missing the {name} claim")
+        return None
+    if isinstance(value, bool) or not isinstance(value, Real):
+        raise GrantError(f"{name} claim must be numeric")
+    return value
 
 
 def verify_grant(token, *, public_keys, audience, now):
@@ -50,13 +63,11 @@ def verify_grant(token, *, public_keys, audience, now):
 
     now_ts = now.timestamp()
 
-    exp = claims.get("exp")
-    if exp is None:
-        raise GrantError("grant is missing the exp claim")
+    exp = _numeric_claim(claims, "exp", required=True)
     if now_ts >= exp:
         raise GrantError("grant has expired")
 
-    nbf = claims.get("nbf")
+    nbf = _numeric_claim(claims, "nbf", required=False)
     if nbf is not None and now_ts < nbf:
         raise GrantError("grant is not yet valid (nbf)")
 
@@ -103,7 +114,32 @@ class ReplayCache:
         return True
 
 
-def verify_proof(proof, *, client_key, audience, method, now, skew_seconds=30, replay_cache=None):
+def _verified_proof_nonce(claims, *, audience, method, request_sha256, now, skew_seconds):
+    if claims.get("aud") != audience:
+        raise GrantError("proof audience mismatch")
+    if claims.get("method") != method:
+        raise GrantError("proof method mismatch")
+    proof_request_sha256 = claims.get("request_sha256")
+    if not isinstance(request_sha256, str) or not request_sha256:
+        raise GrantError("request digest is missing or malformed")
+    if not isinstance(proof_request_sha256, str) or not proof_request_sha256:
+        raise GrantError("proof is missing request_sha256")
+    if not compare_digest(proof_request_sha256, request_sha256):
+        raise GrantError("proof request digest mismatch")
+
+    iat = claims.get("iat")
+    if iat is None or isinstance(iat, bool) or not isinstance(iat, Real):
+        raise GrantError("proof timestamp outside skew window")
+    if abs(now.timestamp() - iat) > skew_seconds:
+        raise GrantError("proof timestamp outside skew window")
+
+    nonce = claims.get("nonce")
+    if not isinstance(nonce, str) or not nonce:
+        raise GrantError("proof is missing a nonce")
+    return nonce
+
+
+def verify_proof(proof, *, client_key, audience, method, request_sha256, now, skew_seconds=30, replay_cache=None):
     """Verify a per-request proof signed by the client's ``cnf`` key (anti-replay).
 
     The proof binds a request to the client keypair the grant was issued for, and to
@@ -125,18 +161,14 @@ def verify_proof(proof, *, client_key, audience, method, now, skew_seconds=30, r
     if not isinstance(claims, dict):
         raise GrantError("proof payload is not a claims object")
 
-    if claims.get("aud") != audience:
-        raise GrantError("proof audience mismatch")
-    if claims.get("method") != method:
-        raise GrantError("proof method mismatch")
-
-    iat = claims.get("iat")
-    if iat is None or abs(now.timestamp() - iat) > skew_seconds:
-        raise GrantError("proof timestamp outside skew window")
-
-    nonce = claims.get("nonce")
-    if not nonce:
-        raise GrantError("proof is missing a nonce")
+    nonce = _verified_proof_nonce(
+        claims,
+        audience=audience,
+        method=method,
+        request_sha256=request_sha256,
+        now=now,
+        skew_seconds=skew_seconds,
+    )
     if replay_cache is not None and not replay_cache.check_and_add(nonce, now):
         raise GrantError("proof nonce replay detected")
 

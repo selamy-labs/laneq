@@ -11,7 +11,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from laneq.auth import GrantError, ReplayCache, verify_proof
 
 AUDIENCE = "laneq://agent-host:9999"
-METHOD = "/laneq.Laneq/Take"
+METHOD = "/laneq.v1.Laneq/Take"
+REQUEST_SHA256 = "a" * 64
 NOW = datetime(2026, 6, 25, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -32,15 +33,25 @@ def _keypair():
     )
 
 
-def _sign_proof(signing_key, *, aud=AUDIENCE, method=METHOD, now=NOW, iat_offset=0, nonce="n1"):
-    claims = {"aud": aud, "method": method, "iat": int(now.timestamp()) + iat_offset, "nonce": nonce}
+def _sign_proof(
+    signing_key, *, aud=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW, iat_offset=0, nonce="n1"
+):
+    claims = {
+        "aud": aud,
+        "method": method,
+        "request_sha256": request_sha256,
+        "iat": int(now.timestamp()) + iat_offset,
+        "nonce": nonce,
+    }
     return pyseto.encode(signing_key, json.dumps(claims).encode(), footer=b"")
 
 
 def test_verify_proof_valid_returns_claims():
     client_sign, client_verify = _keypair()
     proof = _sign_proof(client_sign)
-    claims = verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+    claims = verify_proof(
+        proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+    )
     assert claims["nonce"] == "n1"
     assert claims["method"] == METHOD
 
@@ -50,65 +61,124 @@ def test_verify_proof_rejects_wrong_client_key():
     _, other_verify = _keypair()
     proof = _sign_proof(client_sign)  # not signed by other_verify's key
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=other_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=other_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_wrong_audience():
     client_sign, client_verify = _keypair()
     proof = _sign_proof(client_sign, aud="laneq://other:9999")
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_wrong_method():
     client_sign, client_verify = _keypair()
-    proof = _sign_proof(client_sign, method="/laneq.Laneq/Done")  # proof for a different RPC
+    proof = _sign_proof(client_sign, method="/laneq.v1.Laneq/Done")  # proof for a different RPC
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
+
+
+def test_verify_proof_rejects_missing_request_digest():
+    client_sign, client_verify = _keypair()
+    claims = {"aud": AUDIENCE, "method": METHOD, "iat": int(NOW.timestamp()), "nonce": "n1"}
+    proof = pyseto.encode(client_sign, json.dumps(claims).encode(), footer=b"")
+    with pytest.raises(GrantError):
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
+
+
+def test_verify_proof_rejects_wrong_request_digest():
+    client_sign, client_verify = _keypair()
+    proof = _sign_proof(client_sign, request_sha256="b" * 64)
+    with pytest.raises(GrantError):
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_stale_iat():
     client_sign, client_verify = _keypair()
     proof = _sign_proof(client_sign, iat_offset=-120)  # 2 minutes old, outside ±30s skew
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW, skew_seconds=30)
+        verify_proof(
+            proof,
+            client_key=client_verify,
+            audience=AUDIENCE,
+            method=METHOD,
+            request_sha256=REQUEST_SHA256,
+            now=NOW,
+            skew_seconds=30,
+        )
 
 
 def test_verify_proof_rejects_future_iat():
     client_sign, client_verify = _keypair()
     proof = _sign_proof(client_sign, iat_offset=120)  # 2 minutes in the future
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW, skew_seconds=30)
+        verify_proof(
+            proof,
+            client_key=client_verify,
+            audience=AUDIENCE,
+            method=METHOD,
+            request_sha256=REQUEST_SHA256,
+            now=NOW,
+            skew_seconds=30,
+        )
 
 
 def test_verify_proof_rejects_missing_nonce():
     client_sign, client_verify = _keypair()
-    claims = {"aud": AUDIENCE, "method": METHOD, "iat": int(NOW.timestamp())}  # no nonce
+    claims = {"aud": AUDIENCE, "method": METHOD, "request_sha256": REQUEST_SHA256, "iat": int(NOW.timestamp())}
     proof = pyseto.encode(client_sign, json.dumps(claims).encode(), footer=b"")
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_malformed_payload():
     client_sign, client_verify = _keypair()
     proof = pyseto.encode(client_sign, b"not-json", footer=b"")
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_non_object_payload():
     client_sign, client_verify = _keypair()
     proof = pyseto.encode(client_sign, b"7", footer=b"")  # valid JSON, not an object
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_missing_iat():
     client_sign, client_verify = _keypair()
-    claims = {"aud": AUDIENCE, "method": METHOD, "nonce": "n1"}  # no iat
+    claims = {"aud": AUDIENCE, "method": METHOD, "request_sha256": REQUEST_SHA256, "nonce": "n1"}  # no iat
     proof = pyseto.encode(client_sign, json.dumps(claims).encode(), footer=b"")
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW)
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
+
+
+def test_verify_proof_rejects_non_numeric_iat():
+    client_sign, client_verify = _keypair()
+    claims = {"aud": AUDIENCE, "method": METHOD, "request_sha256": REQUEST_SHA256, "iat": "now", "nonce": "n1"}
+    proof = pyseto.encode(client_sign, json.dumps(claims).encode(), footer=b"")
+    with pytest.raises(GrantError):
+        verify_proof(
+            proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW
+        )
 
 
 def test_verify_proof_rejects_replayed_nonce():
@@ -116,10 +186,26 @@ def test_verify_proof_rejects_replayed_nonce():
     cache = ReplayCache(ttl_seconds=60)
     proof = _sign_proof(client_sign, nonce="once")
     # First use succeeds...
-    verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW, replay_cache=cache)
+    verify_proof(
+        proof,
+        client_key=client_verify,
+        audience=AUDIENCE,
+        method=METHOD,
+        request_sha256=REQUEST_SHA256,
+        now=NOW,
+        replay_cache=cache,
+    )
     # ...replay of the SAME nonce is rejected.
     with pytest.raises(GrantError):
-        verify_proof(proof, client_key=client_verify, audience=AUDIENCE, method=METHOD, now=NOW, replay_cache=cache)
+        verify_proof(
+            proof,
+            client_key=client_verify,
+            audience=AUDIENCE,
+            method=METHOD,
+            request_sha256=REQUEST_SHA256,
+            now=NOW,
+            replay_cache=cache,
+        )
 
 
 def test_replay_cache_first_use_then_reject():

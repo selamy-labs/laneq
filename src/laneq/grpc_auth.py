@@ -5,6 +5,7 @@ Modes: ``off`` (bypass), ``log-only`` (verify + log failures, but allow — for 
 rollout), ``enforce`` (reject invalid calls with UNAUTHENTICATED).
 """
 
+import hashlib
 import logging
 import os
 from datetime import datetime, timezone
@@ -44,15 +45,33 @@ class GrantAuthInterceptor(grpc.aio.ServerInterceptor):
             return await continuation(handler_call_details)
         method = handler_call_details.method
         metadata = dict(handler_call_details.invocation_metadata or ())
-        try:
-            self._authenticate(metadata, method)
-        except GrantError as exc:
-            self._log.warning("laneq auth rejected method=%s: %s", method, exc)
+        handler = await continuation(handler_call_details)
+        if handler is None:
+            return None
+        if handler.unary_unary is None:
+            message = "auth interceptor only supports unary-unary RPCs"
+            self._log.warning("laneq auth rejected method=%s: %s", method, message)
             if self._mode == "enforce":
-                return _deny(str(exc))
-        return await continuation(handler_call_details)
+                return _deny(message)
+            return handler
 
-    def _authenticate(self, metadata, method):
+        async def authenticated_unary_unary(request, context):
+            try:
+                request_sha256 = _request_sha256(request)
+                self._authenticate(metadata, method, request_sha256)
+            except GrantError as exc:
+                self._log.warning("laneq auth rejected method=%s: %s", method, exc)
+                if self._mode == "enforce":
+                    await context.abort(grpc.StatusCode.UNAUTHENTICATED, str(exc))
+            return await handler.unary_unary(request, context)
+
+        return grpc.unary_unary_rpc_method_handler(
+            authenticated_unary_unary,
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+
+    def _authenticate(self, metadata, method, request_sha256):
         grant_token = metadata.get(GRANT_METADATA_KEY)
         proof_token = metadata.get(PROOF_METADATA_KEY)
         if not grant_token or not proof_token:
@@ -65,6 +84,7 @@ class GrantAuthInterceptor(grpc.aio.ServerInterceptor):
             client_key=client_key,
             audience=self._audience,
             method=method,
+            request_sha256=request_sha256,
             now=now,
             skew_seconds=self._skew,
             replay_cache=self._replay,
@@ -76,6 +96,14 @@ def _deny(details):
         await context.abort(grpc.StatusCode.UNAUTHENTICATED, details)
 
     return grpc.unary_unary_rpc_method_handler(abort)
+
+
+def _request_sha256(request):
+    try:
+        payload = request.SerializeToString(deterministic=True)
+    except Exception as exc:
+        raise GrantError("request cannot be serialized for proof binding") from exc
+    return hashlib.sha256(payload).hexdigest()
 
 
 def build_interceptor_from_env(env=None):
