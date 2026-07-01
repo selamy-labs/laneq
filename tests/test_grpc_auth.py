@@ -9,10 +9,13 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from laneq.grpc_auth import GrantAuthInterceptor, build_interceptor_from_env
+from laneq.grpc import laneq_pb2
+from laneq.grpc_auth import GrantAuthInterceptor, _request_sha256, build_interceptor_from_env
 
 AUD = "laneq://agent-host:9999"
-METHOD = "/laneq.Laneq/Take"
+METHOD = "/laneq.v1.Laneq/Take"
+REQUEST = laneq_pb2.TakeRequest(consumer="worker", lane="default")
+REQUEST_SHA256 = _request_sha256(REQUEST)
 NOW = datetime(2026, 6, 25, 12, 0, 0, tzinfo=timezone.utc)
 
 
@@ -56,8 +59,14 @@ def _grant(issuer_priv, client_pub, *, aud=AUD, now=NOW, ttl=1800, cnf="default"
     return pyseto.encode(_sign_key(issuer_priv), json.dumps(claims).encode(), footer=footer).decode()
 
 
-def _proof(client_priv, *, aud=AUD, method=METHOD, now=NOW, nonce="n1"):
-    claims = {"aud": aud, "method": method, "iat": int(now.timestamp()), "nonce": nonce}
+def _proof(client_priv, *, aud=AUD, method=METHOD, request_sha256=REQUEST_SHA256, now=NOW, nonce="n1"):
+    claims = {
+        "aud": aud,
+        "method": method,
+        "request_sha256": request_sha256,
+        "iat": int(now.timestamp()),
+        "nonce": nonce,
+    }
     return pyseto.encode(_sign_key(client_priv), json.dumps(claims).encode(), footer=b"").decode()
 
 
@@ -82,8 +91,12 @@ class _FakeContext:
         raise _Aborted(details)
 
 
-async def _continuation(_details):
+async def _ok(_request, _context):
     return "PASSTHROUGH"
+
+
+async def _continuation(_details):
+    return grpc.unary_unary_rpc_method_handler(_ok)
 
 
 def _interceptor(issuer_pub, mode, **kw):
@@ -95,8 +108,13 @@ async def _assert_denied(handler):
     assert handler != "PASSTHROUGH"
     ctx = _FakeContext()
     with pytest.raises(_Aborted):
-        await handler.unary_unary(b"request", ctx)
+        await handler.unary_unary(REQUEST, ctx)
     assert ctx.code == grpc.StatusCode.UNAUTHENTICATED
+
+
+async def _assert_allowed(handler):
+    ctx = _FakeContext()
+    assert await handler.unary_unary(REQUEST, ctx) == "PASSTHROUGH"
 
 
 @pytest.mark.asyncio
@@ -104,8 +122,8 @@ async def test_enforce_valid_grant_and_proof_passes_through():
     ipriv, ipub = _pem_pair()
     cpriv, cpub = _pem_pair()
     md = (("laneq-grant", _grant(ipriv, cpub)), ("laneq-proof", _proof(cpriv)))
-    result = await _interceptor(ipub, "enforce").intercept_service(_continuation, _Details(METHOD, md))
-    assert result == "PASSTHROUGH"
+    handler = await _interceptor(ipub, "enforce").intercept_service(_continuation, _Details(METHOD, md))
+    await _assert_allowed(handler)
 
 
 @pytest.mark.asyncio
@@ -150,23 +168,36 @@ async def test_enforce_replayed_proof_denies_second_use():
     interceptor = _interceptor(ipub, "enforce")
     md = (("laneq-grant", _grant(ipriv, cpub)), ("laneq-proof", _proof(cpriv, nonce="same")))
     first = await interceptor.intercept_service(_continuation, _Details(METHOD, md))
-    assert first == "PASSTHROUGH"
+    await _assert_allowed(first)
     second = await interceptor.intercept_service(_continuation, _Details(METHOD, md))
     await _assert_denied(second)
 
 
 @pytest.mark.asyncio
+async def test_enforce_proof_bound_to_different_request_denies():
+    ipriv, ipub = _pem_pair()
+    cpriv, cpub = _pem_pair()
+    other_request_sha256 = _request_sha256(laneq_pb2.TakeRequest(consumer="other-worker", lane="default"))
+    md = (
+        ("laneq-grant", _grant(ipriv, cpub)),
+        ("laneq-proof", _proof(cpriv, request_sha256=other_request_sha256)),
+    )
+    handler = await _interceptor(ipub, "enforce").intercept_service(_continuation, _Details(METHOD, md))
+    await _assert_denied(handler)
+
+
+@pytest.mark.asyncio
 async def test_log_only_allows_invalid_grant():
     _, ipub = _pem_pair()
-    result = await _interceptor(ipub, "log-only").intercept_service(_continuation, _Details(METHOD, ()))
-    assert result == "PASSTHROUGH"  # verified + logged, but allowed
+    handler = await _interceptor(ipub, "log-only").intercept_service(_continuation, _Details(METHOD, ()))
+    await _assert_allowed(handler)  # verified + logged, but allowed
 
 
 @pytest.mark.asyncio
 async def test_off_bypasses_verification():
     _, ipub = _pem_pair()
-    result = await _interceptor(ipub, "off").intercept_service(_continuation, _Details(METHOD, ()))
-    assert result == "PASSTHROUGH"
+    handler = await _interceptor(ipub, "off").intercept_service(_continuation, _Details(METHOD, ()))
+    await _assert_allowed(handler)
 
 
 @pytest.mark.asyncio

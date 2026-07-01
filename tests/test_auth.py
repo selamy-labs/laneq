@@ -108,6 +108,28 @@ def test_verify_grant_rejects_missing_exp():
         verify_grant(token, public_keys=[verify_key], audience=AUDIENCE, now=NOW)
 
 
+def test_verify_grant_rejects_non_numeric_exp():
+    signing_key, verify_key = _keypair()
+    claims = {"iss": "mac-issuer", "sub": "agent-host", "aud": AUDIENCE, "exp": "not-a-number"}
+    token = pyseto.encode(signing_key, json.dumps(claims).encode(), footer=b"")
+    with pytest.raises(GrantError):
+        verify_grant(token, public_keys=[verify_key], audience=AUDIENCE, now=NOW)
+
+
+def test_verify_grant_rejects_non_numeric_nbf():
+    signing_key, verify_key = _keypair()
+    claims = {
+        "iss": "mac-issuer",
+        "sub": "agent-host",
+        "aud": AUDIENCE,
+        "exp": int(NOW.timestamp()) + 1800,
+        "nbf": "not-a-number",
+    }
+    token = pyseto.encode(signing_key, json.dumps(claims).encode(), footer=b"")
+    with pytest.raises(GrantError):
+        verify_grant(token, public_keys=[verify_key], audience=AUDIENCE, now=NOW)
+
+
 def test_verify_grant_rejects_non_object_payload():
     signing_key, verify_key = _keypair()
     token = pyseto.encode(signing_key, b"42", footer=b"")  # valid JSON, but not an object
