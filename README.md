@@ -267,3 +267,9 @@ coverage report --fail-under=95
 ```
 
 The runtime package intentionally has zero third-party dependencies.
+
+## Architecture
+
+The [system context](docs/architecture/system-context.md) documents laneq's
+runtime clients, shared queue boundary, local SQLite persistence, and optional
+telemetry export.
