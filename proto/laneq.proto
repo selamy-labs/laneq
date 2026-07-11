@@ -8,20 +8,20 @@ option go_package = "github.com/agent-sandbox/incus-dispatcher/queue/laneqpb;lan
 // Lower values indicate higher priority (P0 before P1 before P2).
 enum Priority {
   PRIORITY_UNSPECIFIED = 0;
-  PRIORITY_P0 = 1;  // High priority
-  PRIORITY_P1 = 2;  // Normal priority
-  PRIORITY_P2 = 3;  // Low priority
+  PRIORITY_P0 = 1; // High priority
+  PRIORITY_P1 = 2; // Normal priority
+  PRIORITY_P2 = 3; // Low priority
 }
 
 // Status represents the current state of a directive in the queue.
 enum Status {
   STATUS_UNSPECIFIED = 0;
-  STATUS_PENDING = 1;   // Waiting to be claimed
-  STATUS_TAKEN = 2;     // Claimed by a consumer; has active lease
-  STATUS_DEFERRED = 3;  // Deferred until not_before; eligible for auto-promotion
-  STATUS_DONE = 4;      // Completed; removed from queue
-  STATUS_DROPPED = 5;   // Abandoned; removed from queue
-  STATUS_PARKED = 6;    // Durable hold; excluded from claim/peek/reap; never auto-promotes
+  STATUS_PENDING = 1; // Waiting to be claimed
+  STATUS_TAKEN = 2; // Claimed by a consumer; has active lease
+  STATUS_DEFERRED = 3; // Deferred until not_before; eligible for auto-promotion
+  STATUS_DONE = 4; // Completed; removed from queue
+  STATUS_DROPPED = 5; // Abandoned; removed from queue
+  STATUS_PARKED = 6; // Durable hold; excluded from claim/peek/reap; never auto-promotes
 }
 
 // Directive is the unit of work in the queue.
@@ -29,28 +29,28 @@ enum Status {
 message Directive {
   string id = 1;
   Priority priority = 2;
-  string body = 3;           // Opaque JSON (intent, template, origin, repo, ref, task, grade, deadline, etc.)
+  string body = 3; // Opaque JSON (intent, template, origin, repo, ref, task, grade, deadline, etc.)
   Status status = 4;
-  string lane = 5;           // Queue lane (default: "default")
+  string lane = 5; // Queue lane (default: "default")
   int64 created_at_unix = 6; // Unix timestamp (always set; non-optional)
-  optional int64 taken_at_unix = 7;   // Unix timestamp; absent if not yet taken
-  optional int64 done_at_unix = 8;    // Unix timestamp; absent if not yet done
-  string taken_by = 9;       // Consumer ID that claimed this directive
+  optional int64 taken_at_unix = 7; // Unix timestamp; absent if not yet taken
+  optional int64 done_at_unix = 8; // Unix timestamp; absent if not yet done
+  string taken_by = 9; // Consumer ID that claimed this directive
   optional int64 lease_until_unix = 10; // Unix timestamp; absent if no active lease
-  int32 requeue_count = 11;  // Number of times requeued
-  string parent_id = 12;     // Parent directive ID for threading; "" if root
+  int32 requeue_count = 11; // Number of times requeued
+  string parent_id = 12; // Parent directive ID for threading; "" if root
   optional int64 not_before_unix = 13; // Eligibility gate; absent means always eligible
   repeated string blocked_by = 14; // List of blocking directive IDs (dependencies)
 
-  reserved 100 to 199;       // Reserved for future expansion
+  reserved 100 to 199; // Reserved for future expansion
 }
 
 // Push request enqueues a new directive.
 message PushRequest {
-  string body = 1;           // Opaque JSON
-  Priority priority = 2;     // Default: PRIORITY_P1
-  string parent_id = 3;      // Optional parent for threading
-  string lane = 4;           // Default: "default"
+  string body = 1; // Opaque JSON
+  Priority priority = 2; // Default: PRIORITY_P1
+  string parent_id = 3; // Optional parent for threading
+  string lane = 4; // Default: "default"
 }
 
 // Push response returns the assigned ID and status.
@@ -60,32 +60,32 @@ message PushResponse {
   string lane = 3;
   string parent_id = 4;
   Status status = 5;
-  string summary = 6;  // Human-readable summary (e.g., "enqueued in lane 'default'")
+  string summary = 6; // Human-readable summary (e.g., "enqueued in lane 'default'")
 }
 
 // Take request claims the next eligible directive.
 message TakeRequest {
-  string consumer = 1;      // Consumer identifier
-  string lane = 2;          // Default: "default"
+  string consumer = 1; // Consumer identifier
+  string lane = 2; // Default: "default"
   int64 lease_duration_ms = 3; // Lease duration in milliseconds
   int64 reap_stale_seconds = 4; // Optional: reap leases older than this many seconds
 }
 
 // Take response returns the claimed directive and lease.
 message TakeResponse {
-  Directive directive = 1;  // The claimed directive; nil if none available
-  string consumer = 2;       // Echo of the requesting consumer
+  Directive directive = 1; // The claimed directive; nil if none available
+  string consumer = 2; // Echo of the requesting consumer
   string lane = 3;
 }
 
 // Peek request queries the next eligible directive without claiming.
 message PeekRequest {
-  string lane = 1;  // Default: "default"
+  string lane = 1; // Default: "default"
 }
 
 // Peek response returns the directive (if any) without claiming.
 message PeekResponse {
-  Directive directive = 1;  // Nil if no eligible directive
+  Directive directive = 1; // Nil if no eligible directive
 }
 
 // Show request retrieves full details of a directive by ID.
@@ -108,9 +108,9 @@ message ThreadItem {
 
 // Listing request queries directives with optional filters.
 message ListingRequest {
-  bool all_statuses = 1;  // If false, return pending only
-  string lane = 2;        // Optional lane filter; "" = all lanes
-  string thread = 3;      // Optional thread (parent) filter; "" = all
+  bool all_statuses = 1; // If false, return pending only
+  string lane = 2; // Optional lane filter; "" = all lanes
+  string thread = 3; // Optional thread (parent) filter; "" = all
 }
 
 // Listing response returns matching directives.
@@ -133,7 +133,7 @@ message ReprioritizeResponse {
 // SetStatus request changes a directive's status.
 message SetStatusRequest {
   string id = 1;
-  Status status = 2;  // Must be one of: pending (requeue), done, dropped
+  Status status = 2; // Must be one of: pending (requeue), done, dropped
 }
 
 // SetStatus response confirms the change.
@@ -145,43 +145,43 @@ message SetStatusResponse {
 // Defer request defers a directive until a specified time.
 message DeferRequest {
   string id = 1;
-  optional int64 until_unix = 2;     // Unix timestamp; absent = use delay
-  int64 delay_ms = 3;       // Alternative to until_unix (milliseconds from now)
+  optional int64 until_unix = 2; // Unix timestamp; absent = use delay
+  int64 delay_ms = 3; // Alternative to until_unix (milliseconds from now)
   repeated string blocked_by = 4; // Optional dependency list
 }
 
 // Defer response confirms the deferred status.
 message DeferResponse {
   string id = 1;
-  Status status = 2;          // Will be STATUS_DEFERRED
-  optional int64 not_before_unix = 3;  // Absence means always eligible
+  Status status = 2; // Will be STATUS_DEFERRED
+  optional int64 not_before_unix = 3; // Absence means always eligible
   repeated string blocked_by = 4;
 }
 
 // Touch request renews a lease on a claimed directive.
 message TouchRequest {
   string id = 1;
-  string consumer = 2;        // Consumer holding the lease
+  string consumer = 2; // Consumer holding the lease
   int64 lease_duration_ms = 3; // New lease duration
 }
 
 // Touch response returns the updated lease expiry.
 message TouchResponse {
   string id = 1;
-  optional int64 lease_until_unix = 2;  // Absence means no active lease
+  optional int64 lease_until_unix = 2; // Absence means no active lease
 }
 
 // Reap request reclaims expired leases and stale deferred directives.
 message ReapRequest {
-  bool expired_leases = 1;    // If true, reap expired lease_until
-  int64 stale_seconds = 2;    // If > 0, reap deferred items not promoted after this many seconds
+  bool expired_leases = 1; // If true, reap expired lease_until
+  int64 stale_seconds = 2; // If > 0, reap deferred items not promoted after this many seconds
 }
 
 // Reap response reports what was reclaimed.
 message ReapResponse {
-  string mode = 1;            // "expired_leases" | "stale_deferred" | "both"
-  int32 reclaimed = 2;        // Count of directives reclaimed
-  string detail = 3;          // Optional human-readable detail
+  string mode = 1; // "expired_leases" | "stale_deferred" | "both"
+  int32 reclaimed = 2; // Count of directives reclaimed
+  string detail = 3; // Optional human-readable detail
 }
 
 // Stats request queries queue statistics.
@@ -189,7 +189,7 @@ message StatsRequest {}
 
 // Stats response includes aggregated stats.
 message StatsResponse {
-  map<string, int32> by_status = 1;  // Count by status (pending, taken, deferred, done, dropped, parked)
+  map<string, int32> by_status = 1; // Count by status (pending, taken, deferred, done, dropped, parked)
   repeated ConsumerStats consumers = 2;
 }
 
@@ -203,28 +203,28 @@ message ConsumerStats {
 
 // ThreadStatus request queries the status of a directive thread.
 message ThreadStatusRequest {
-  string id = 1;  // Root directive ID of the thread
+  string id = 1; // Root directive ID of the thread
 }
 
 // ThreadStatus response includes thread-level aggregation.
 message ThreadStatusResponse {
   string root = 1;
-  Status status = 2;           // "open" (any pending/deferred/taken) | "done" (all completed)
-  int32 total = 3;             // Total directives in thread (including root)
-  int32 open = 4;              // Pending + deferred + taken count
+  Status status = 2; // "open" (any pending/deferred/taken) | "done" (all completed)
+  int32 total = 3; // Total directives in thread (including root)
+  int32 open = 4; // Pending + deferred + taken count
   repeated ThreadItem open_items = 5;
 }
 
 // Park request moves a claimed directive into durable hold (parked status).
 message ParkRequest {
   string id = 1;
-  string consumer = 2;  // Consumer holding the lease
+  string consumer = 2; // Consumer holding the lease
 }
 
 // Park response confirms the park.
 message ParkResponse {
   string id = 1;
-  Status status = 2;  // Will be STATUS_PARKED
+  Status status = 2; // Will be STATUS_PARKED
 }
 
 // Unpark request removes a directive from parked status (returns to pending).
@@ -235,7 +235,7 @@ message UnparkRequest {
 // Unpark response confirms the unpark.
 message UnparkResponse {
   string id = 1;
-  Status status = 2;  // Will be STATUS_PENDING
+  Status status = 2; // Will be STATUS_PENDING
 }
 
 // Laneq service definition.
