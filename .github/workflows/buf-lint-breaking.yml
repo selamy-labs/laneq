@@ -1,0 +1,21 @@
+name: Buf Lint and Breaking Check
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  buf-lint-breaking:
+    uses: selamy-labs/.github/.github/workflows/buf-lint-breaking.yml@main
+    with:
+      input: proto
+      against: .git#branch=origin/main

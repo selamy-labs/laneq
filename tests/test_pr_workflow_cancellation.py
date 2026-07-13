@@ -29,6 +29,7 @@ def test_pull_request_workflows_cancel_obsolete_runs() -> None:
 
     assert checked == [
         "buf-format-check.yml",
+        "buf-lint-breaking.yml",
         "diagram-freshness.yml",
         "secret-scan.yml",
         "test.yml",
