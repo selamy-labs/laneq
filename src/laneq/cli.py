@@ -6,9 +6,9 @@ import argparse
 import datetime as dt
 import json
 import os
-import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -168,11 +168,17 @@ def make_backup_path(path: Path) -> Path:
     return candidate
 
 
-def backup_database(conn: sqlite3.Connection, path: Path, keep_backups: int) -> tuple[Path, list[Path]]:
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+def backup_database(path: Path, keep_backups: int) -> tuple[Path, list[Path]]:
+    # The caller holds BEGIN IMMEDIATE. A separate reader can make an online
+    # backup of the committed pre-migration state, including WAL pages.
     backup_path = make_backup_path(path)
-    shutil.copy2(path, backup_path)
-    verify_sqlite_integrity(backup_path)
+    try:
+        with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(backup_path)) as target:
+            source.backup(target)
+        verify_sqlite_integrity(backup_path)
+    except Exception:
+        backup_path.unlink(missing_ok=True)
+        raise
     pruned = prune_old_backups(path, keep_backups)
     return backup_path, pruned
 
@@ -194,15 +200,14 @@ def migrate(
 
     backup_path = None
     pruned: list[Path] = []
-    if path is not None and existed_before_open:
-        backup_path, pruned = backup_database(conn, path, keep_backups)
-
     changes: list[str] = []
     try:
         conn.execute("BEGIN IMMEDIATE")
         # Another opener may have migrated the database while we waited for
         # the write lock. Plan against the schema protected by this lock.
         plan = migration_plan(conn)
+        if plan and path is not None and existed_before_open:
+            backup_path, pruned = backup_database(path, keep_backups)
         for step, (name, sql, params) in enumerate(plan, start=1):
             conn.execute(sql, params)
             changes.append(name)

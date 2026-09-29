@@ -392,7 +392,7 @@ def test_concurrent_first_open_replans_after_write_lock(tmp_path: Path, monkeypa
     def open_and_migrate() -> list[str]:
         conn = sqlite3.connect(db, timeout=5)
         try:
-            return cli.migrate(conn).changes
+            return cli.migrate(conn, path=db).changes
         finally:
             conn.close()
 
@@ -403,6 +403,10 @@ def test_concurrent_first_open_replans_after_write_lock(tmp_path: Path, monkeypa
     assert sum("add_claim_token" in plan for plan in changes) == 1
     assert sum(not plan for plan in changes) == 1
     assert "claim_token" in {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
+    backups = backup_files(db)
+    assert len(backups) == 1
+    assert "claim_token" not in {row[1] for row in rows(backups[0], "PRAGMA table_info(directives)")}
+    assert rows(backups[0], "PRAGMA integrity_check") == [("ok",)]
 
 
 def test_next_records_consumer_lease_and_touch_extends(tmp_path: Path) -> None:

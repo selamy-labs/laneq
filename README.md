@@ -193,12 +193,13 @@ Existing v0.1 databases migrate in place on first open. New columns are added
 for consumers, leases, lane names, parent links, deferral metadata, and requeue
 counts while preserving existing directive ids and statuses.
 
-Before any migration touches an existing database, `laneq` checkpoints WAL,
-copies `laneq.db` to `laneq.db.backup-<UTC>`, opens that backup, and requires
-`PRAGMA integrity_check` to return `ok`. The migration then runs in one
-transaction; on failure, SQLite rolls the original database back and the
-verified backup remains. Backup retention defaults to the last 5 copies and can
-be changed with `LANEQ_BACKUP_RETENTION` or `laneq migrate --keep-backups N`.
+Before any migration touches an existing database, `laneq` takes a SQLite
+write lock, checks the current schema, makes an online backup (including WAL
+pages) at `laneq.db.backup-<UTC>`, and requires `PRAGMA integrity_check` to
+return `ok`. The migration then runs under that lock; on failure, SQLite rolls
+the original database back and the verified backup remains. Backup retention
+defaults to the last 5 copies and can be changed with
+`LANEQ_BACKUP_RETENTION` or `laneq migrate --keep-backups N`.
 
 Use `laneq migrate --dry-run` to inspect planned schema/data changes without
 modifying the database. A successful explicit migration prints the changed
