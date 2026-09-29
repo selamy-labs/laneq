@@ -42,6 +42,26 @@ def _priority_value(priority: str) -> int:
     return PRIORITIES[priority]
 
 
+def _claim_guard(claim_token: str | None, force: bool) -> tuple[str, tuple[Any, ...]]:
+    """Require a live claim or an explicit administrative override for a mutation."""
+    if claim_token is not None:
+        if not claim_token or force:
+            raise QueueError("provide either a nonempty claim token or --force")
+        return (
+            " AND status='taken' AND claim_token=? AND lease_until>strftime('%Y-%m-%dT%H:%M:%SZ','now')",
+            (claim_token,),
+        )
+    if force:
+        return "", ()
+    raise PreconditionError("claim token required; use --force for an administrative override")
+
+
+def _raise_missing_or_inactive(conn: sqlite3.Connection, item_id: int) -> None:
+    if conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone() is None:
+        raise NotFoundError(f"no item #{item_id}")
+    raise PreconditionError(f"claim for item #{item_id} is no longer active")
+
+
 def push(
     body: str,
     *,
@@ -232,20 +252,16 @@ def reprioritize(item_id: int, priority: str) -> dict[str, Any]:
     return {"id": item_id, "priority": priority}
 
 
-def set_status(item_id: int, status: str, *, claim_token: str | None = None) -> dict[str, Any]:
+def set_status(item_id: int, status: str, *, claim_token: str | None = None, force: bool = False) -> dict[str, Any]:
     """Set a directive's status (``done``, ``pending``/requeue, ``dropped``)."""
+    guard, guard_args = _claim_guard(claim_token, force)
     conn = cli.connect()
     if claim_token is not None:
-        if not claim_token:
-            raise QueueError("claim token must not be empty")
         conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
     cli.reclaim_deferred(conn)
-    where = "id=?"
-    where_args: tuple[Any, ...] = (item_id,)
-    if claim_token is not None:
-        where += " AND status='taken' AND claim_token=? AND lease_until>?"
-        where_args += (claim_token, cli.utc_now())
+    where = "id=?" + guard
+    where_args = (item_id, *guard_args)
     if status == "pending":
         cur = conn.execute(
             "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
@@ -266,10 +282,7 @@ def set_status(item_id: int, status: str, *, claim_token: str | None = None) -> 
         )
     conn.commit()
     if cur.rowcount == 0:
-        existing = conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone()
-        if existing is None:
-            raise NotFoundError(f"no item #{item_id}")
-        raise PreconditionError(f"claim for item #{item_id} is no longer active")
+        _raise_missing_or_inactive(conn, item_id)
     return {"id": item_id, "status": status}
 
 
@@ -279,8 +292,11 @@ def defer(
     until: str | None = None,
     delay: str | int | None = None,
     blocked_by: list[str] | None = None,
+    claim_token: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Defer a directive until a time and/or dependency items are terminal."""
+    guard, guard_args = _claim_guard(claim_token, force)
     if until and delay:
         raise QueueError("use either --until or --for, not both")
     not_before = None
@@ -299,6 +315,8 @@ def defer(
     if item_id in dep_ids:
         raise QueueError("an item cannot be blocked by itself")
     conn = cli.connect()
+    if claim_token is not None:
+        conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
     for dep_id in dep_ids:
         if not cli.parent_exists(conn, dep_id):
@@ -306,29 +324,27 @@ def defer(
     blocked_text = cli.format_dependency_ids(dep_ids)
     cur = conn.execute(
         "UPDATE directives SET status='deferred', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
-        "not_before=?, blocked_by=? WHERE id=?",
-        (not_before, blocked_text, item_id),
+        "not_before=?, blocked_by=? WHERE id=?" + guard,
+        (not_before, blocked_text, item_id, *guard_args),
     )
     conn.commit()
     if cur.rowcount == 0:
-        raise NotFoundError(f"no item #{item_id}")
+        _raise_missing_or_inactive(conn, item_id)
     return {"id": item_id, "status": "deferred", "not_before": not_before, "blocked_by": blocked_text}
 
 
-def touch(item_id: int, *, lease: str | int | None = None, claim_token: str | None = None) -> dict[str, Any]:
+def touch(
+    item_id: int, *, lease: str | int | None = None, claim_token: str | None = None, force: bool = False
+) -> dict[str, Any]:
     """Extend the lease on a taken directive."""
+    guard, guard_args = _claim_guard(claim_token, force)
     conn = cli.connect()
     if claim_token is not None:
-        if not claim_token:
-            raise QueueError("claim token must not be empty")
         conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
     cli.reclaim_deferred(conn)
-    where = "id=? AND status='taken'"
-    where_args: tuple[Any, ...] = (item_id,)
-    if claim_token is not None:
-        where += " AND claim_token=? AND lease_until>?"
-        where_args += (claim_token, cli.utc_now())
+    where = "id=? AND status='taken'" + guard
+    where_args = (item_id, *guard_args)
     cur = conn.execute(
         "UPDATE directives SET lease_until=? WHERE " + where,
         (cli.utc_after(cli.parse_duration(lease)), *where_args),
@@ -401,12 +417,15 @@ def thread_status(item_id: int) -> dict[str, Any]:
     }
 
 
-def park(item_id: int) -> dict[str, Any]:
+def park(item_id: int, *, claim_token: str | None = None, force: bool = False) -> dict[str, Any]:
     """Move a taken directive into parked status (durable hold, excluded from claim/peek/reap)."""
+    guard, guard_args = _claim_guard(claim_token, force)
     conn = cli.connect()
+    if claim_token is not None:
+        conn.execute("BEGIN IMMEDIATE")
     cur = conn.execute(
-        "UPDATE directives SET status=?, claim_token=NULL WHERE id=? AND status='taken'",
-        (PARKED_STATUS, item_id),
+        "UPDATE directives SET status=?, claim_token=NULL WHERE id=? AND status='taken'" + guard,
+        (PARKED_STATUS, item_id, *guard_args),
     )
     conn.commit()
     if cur.rowcount == 0:

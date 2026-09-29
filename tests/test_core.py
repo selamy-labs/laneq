@@ -23,4 +23,4 @@ def test_touch_missing_taken_item_raises(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("LANEQ_DB", str(tmp_path / "queue.db"))
     core.push("not taken", priority="P0")
     with pytest.raises(core.QueueError, match="no taken item #1"):
-        core.touch(1)
+        core.touch(1, force=True)

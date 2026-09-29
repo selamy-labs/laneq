@@ -247,11 +247,10 @@ def parse_duration(value: str | int | None, *, default: int = DEFAULT_LEASE_SECO
 
 
 def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: bool = True) -> int:
-    own_conn = conn is None
     conn = conn or connect()
     caller_had_transaction = conn.in_transaction
     now = utc_now()
-    if own_conn:
+    if not caller_had_transaction:
         conn.execute("BEGIN IMMEDIATE")
     rows = conn.execute(
         "SELECT id, taken_by, lease_until FROM directives "
@@ -259,22 +258,24 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
         "ORDER BY priority ASC, id ASC",
         (now,),
     ).fetchall()
-    for item_id, _, _ in rows:
-        conn.execute(
+    reclaimed = []
+    for item_id, taken_by, lease_until in rows:
+        cur = conn.execute(
             "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
-            "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
-            (item_id,),
+            "requeue_count=COALESCE(requeue_count,0)+1 "
+            "WHERE id=? AND status='taken' AND lease_until<=?",
+            (item_id, now),
         )
-    if own_conn:
+        if cur.rowcount:
+            reclaimed.append((item_id, taken_by, lease_until))
+    if not caller_had_transaction:
         conn.execute("COMMIT")
-    elif rows and not caller_had_transaction:
-        conn.commit()
     if not quiet:
-        if not rows:
+        if not reclaimed:
             print("laneq: no expired leases")
-        for item_id, taken_by, lease_until in rows:
+        for item_id, taken_by, lease_until in reclaimed:
             print(f"#{item_id} -> pending (expired lease_until={lease_until or '-'}, taken_by={taken_by or '-'})")
-    return len(rows)
+    return len(reclaimed)
 
 
 def parse_dependency_ids(value: str | None) -> list[int]:
@@ -305,11 +306,10 @@ def dependencies_satisfied(conn: sqlite3.Connection, blocked_by: str | None) -> 
 
 
 def reclaim_deferred(conn: sqlite3.Connection | None = None) -> int:
-    own_conn = conn is None
     conn = conn or connect()
     caller_had_transaction = conn.in_transaction
     now = utc_now()
-    if own_conn:
+    if not caller_had_transaction:
         conn.execute("BEGIN IMMEDIATE")
     rows = conn.execute(
         "SELECT id, not_before, blocked_by FROM directives WHERE status='deferred' ORDER BY priority ASC, id ASC"
@@ -323,13 +323,11 @@ def reclaim_deferred(conn: sqlite3.Connection | None = None) -> int:
     for item_id in ready:
         conn.execute(
             "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
-            "not_before=NULL, blocked_by=NULL WHERE id=?",
+            "not_before=NULL, blocked_by=NULL WHERE id=? AND status='deferred'",
             (item_id,),
         )
-    if own_conn:
+    if not caller_had_transaction:
         conn.execute("COMMIT")
-    elif ready and not caller_had_transaction:
-        conn.commit()
     return len(ready)
 
 
@@ -531,11 +529,11 @@ def cmd_reprioritize(args: argparse.Namespace) -> int:
     return 0
 
 
-def set_status(item_id: int, status: str, *, claim_token: str | None = None) -> int:
+def set_status(item_id: int, status: str, *, claim_token: str | None = None, force: bool = False) -> int:
     from laneq import core
 
     try:
-        core.set_status(item_id, status, claim_token=claim_token)
+        core.set_status(item_id, status, claim_token=claim_token, force=force)
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -544,15 +542,15 @@ def set_status(item_id: int, status: str, *, claim_token: str | None = None) -> 
 
 
 def cmd_done(args: argparse.Namespace) -> int:
-    return set_status(args.id, "done", claim_token=args.claim_token)
+    return set_status(args.id, "done", claim_token=args.claim_token, force=args.force)
 
 
 def cmd_requeue(args: argparse.Namespace) -> int:
-    return set_status(args.id, "pending", claim_token=args.claim_token)
+    return set_status(args.id, "pending", claim_token=args.claim_token, force=args.force)
 
 
 def cmd_drop(args: argparse.Namespace) -> int:
-    return set_status(args.id, "dropped", claim_token=args.claim_token)
+    return set_status(args.id, "dropped", claim_token=args.claim_token, force=args.force)
 
 
 def cmd_reap(args: argparse.Namespace) -> int:
@@ -567,7 +565,14 @@ def cmd_defer(args: argparse.Namespace) -> int:
     from laneq import core
 
     try:
-        result = core.defer(args.id, until=args.until, delay=args.delay, blocked_by=args.blocked_by)
+        result = core.defer(
+            args.id,
+            until=args.until,
+            delay=args.delay,
+            blocked_by=args.blocked_by,
+            claim_token=args.claim_token,
+            force=args.force,
+        )
     except (argparse.ArgumentTypeError, core.QueueError) as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -601,7 +606,7 @@ def cmd_touch(args: argparse.Namespace) -> int:
     from laneq import core
 
     try:
-        result = core.touch(args.id, lease=args.lease, claim_token=args.claim_token)
+        result = core.touch(args.id, lease=args.lease, claim_token=args.claim_token, force=args.force)
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -713,11 +718,13 @@ def build_parser() -> argparse.ArgumentParser:
     done = sub.add_parser("done")
     done.add_argument("id", type=int)
     done.add_argument("--claim-token", help="only complete the active, unexpired claim with this token")
+    done.add_argument("--force", action="store_true", help="administrative override without a claim token")
     done.set_defaults(fn=cmd_done)
 
     requeue = sub.add_parser("requeue")
     requeue.add_argument("id", type=int)
     requeue.add_argument("--claim-token", help="only requeue the active, unexpired claim with this token")
+    requeue.add_argument("--force", action="store_true", help="administrative override without a claim token")
     requeue.set_defaults(fn=cmd_requeue)
 
     defer = sub.add_parser("defer")
@@ -725,11 +732,14 @@ def build_parser() -> argparse.ArgumentParser:
     defer.add_argument("--until")
     defer.add_argument("--for", dest="delay")
     defer.add_argument("--blocked-by", action="append", default=[])
+    defer.add_argument("--claim-token", help="only defer the active, unexpired claim with this token")
+    defer.add_argument("--force", action="store_true", help="administrative override without a claim token")
     defer.set_defaults(fn=cmd_defer)
 
     drop = sub.add_parser("drop")
     drop.add_argument("id", type=int)
     drop.add_argument("--claim-token", help="only drop the active, unexpired claim with this token")
+    drop.add_argument("--force", action="store_true", help="administrative override without a claim token")
     drop.set_defaults(fn=cmd_drop)
 
     reap = sub.add_parser("reap")
@@ -741,6 +751,7 @@ def build_parser() -> argparse.ArgumentParser:
     touch.add_argument("id", type=int)
     touch.add_argument("--lease", default=str(DEFAULT_LEASE_SECONDS))
     touch.add_argument("--claim-token", help="only renew the active, unexpired claim with this token")
+    touch.add_argument("--force", action="store_true", help="administrative override without a claim token")
     touch.set_defaults(fn=cmd_touch)
 
     thread_status = sub.add_parser("thread-status")

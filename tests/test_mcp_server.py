@@ -127,7 +127,7 @@ def test_list_filters_by_status_lane_and_thread(tmp_path: Path) -> None:
     assert [item["summary"] for item in only_release["items"]] == ["release work"]
 
     call(db, "laneq_next", {"lane": "release"})
-    call(db, "laneq_done", {"id": 2})
+    call(db, "laneq_done", {"force": True, "id": 2})
     assert call(db, "laneq_list", {"lane": "release"})["items"] == []
     all_release = call(db, "laneq_list", {"all_statuses": True, "lane": "release"})
     assert [item["status"] for item in all_release["items"]] == ["done"]
@@ -143,8 +143,8 @@ def test_reprioritize_requeue_and_drop(tmp_path: Path) -> None:
 
     assert call(db, "laneq_reprioritize", {"id": 1, "priority": "P0"}) == {"id": 1, "priority": "P0"}
     assert call(db, "laneq_next")["body"] == "low"
-    assert call(db, "laneq_requeue", {"id": 1}) == {"id": 1, "status": "pending"}
-    assert call(db, "laneq_drop", {"id": 1}) == {"id": 1, "status": "dropped"}
+    assert call(db, "laneq_requeue", {"force": True, "id": 1}) == {"id": 1, "status": "pending"}
+    assert call(db, "laneq_drop", {"force": True, "id": 1}) == {"id": 1, "status": "dropped"}
 
 
 def test_defer_tool_blocks_next_until_dependency_done(tmp_path: Path) -> None:
@@ -153,12 +153,12 @@ def test_defer_tool_blocks_next_until_dependency_done(tmp_path: Path) -> None:
     call(db, "laneq_push", {"body": "blocked", "priority": "P0"})
     call(db, "laneq_push", {"body": "fallback", "priority": "P1"})
 
-    deferred = call(db, "laneq_defer", {"id": 2, "blocked_by": ["1"]})
+    deferred = call(db, "laneq_defer", {"force": True, "id": 2, "blocked_by": ["1"]})
 
     assert deferred == {"id": 2, "status": "deferred", "not_before": None, "blocked_by": "1"}
     assert call(db, "laneq_next")["body"] == "dependency"
     assert call(db, "laneq_next")["body"] == "fallback"
-    call(db, "laneq_done", {"id": 1})
+    call(db, "laneq_done", {"force": True, "id": 1})
     assert call(db, "laneq_next")["body"] == "blocked"
 
 
@@ -167,7 +167,7 @@ def test_touch_extends_lease(tmp_path: Path) -> None:
     call(db, "laneq_push", {"body": "lease me", "priority": "P0"})
     call(db, "laneq_next", {"consumer": "worker", "lease": "10m"})
 
-    touched = call(db, "laneq_touch", {"id": 1, "lease": "1h"})
+    touched = call(db, "laneq_touch", {"force": True, "id": 1, "lease": "1h"})
     assert touched["id"] == 1
     assert touched["lease_until"] is not None
 
@@ -204,8 +204,8 @@ def test_thread_status_tracks_open_and_done(tmp_path: Path) -> None:
     assert open_status["total"] == 2
     assert open_status["open"] == 2
 
-    call(db, "laneq_done", {"id": 1})
-    call(db, "laneq_done", {"id": 2})
+    call(db, "laneq_done", {"force": True, "id": 1})
+    call(db, "laneq_done", {"force": True, "id": 2})
     closed = call(db, "laneq_thread_status", {"id": 1})
     assert closed["status"] == "done"
     assert closed["open"] == 0
@@ -217,7 +217,7 @@ def test_missing_item_surfaces_tool_error(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match="no item #404"):
         call(db, "laneq_show", {"id": 404})
     with pytest.raises(ToolError, match="no item #404"):
-        call(db, "laneq_done", {"id": 404})
+        call(db, "laneq_done", {"force": True, "id": 404})
 
 
 def test_push_rejects_empty_body_and_missing_parent(tmp_path: Path) -> None:

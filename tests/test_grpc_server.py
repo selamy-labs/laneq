@@ -79,12 +79,12 @@ def test_core_defer_and_promotion(temp_db):
     assert take_result["id"] == item_id
 
     # Set status to done
-    set_status_result = core.set_status(item_id, "done")
+    set_status_result = core.set_status(item_id, "done", force=True)
     assert set_status_result["status"] == "done"
 
     # Defer a new directive
     push2 = core.push("deferred_work")
-    defer_result = core.defer(push2["id"], delay="1s")
+    defer_result = core.defer(push2["id"], delay="1s", force=True)
     assert defer_result["status"] == "deferred"
     assert defer_result["not_before"]
 
@@ -99,7 +99,7 @@ def test_core_parked_status(temp_db):
     assert take_result["id"] == item_id
 
     # Park it
-    park_result = core.park(item_id)
+    park_result = core.park(item_id, force=True)
     assert park_result["status"] == "parked"
 
     # Peek should return nothing (parked is not pending)
@@ -133,7 +133,7 @@ def test_core_requeue_count_on_requeue(temp_db):
     assert show["requeue_count"] == 0
 
     # Requeue (set status to pending)
-    core.set_status(item_id, "pending")
+    core.set_status(item_id, "pending", force=True)
 
     # Show after requeue
     show = core.show(item_id)
@@ -143,7 +143,7 @@ def test_core_requeue_count_on_requeue(temp_db):
     core.take(consumer="worker")
 
     # Requeue again
-    core.set_status(item_id, "pending")
+    core.set_status(item_id, "pending", force=True)
 
     # Show after second requeue
     show = core.show(item_id)
@@ -176,7 +176,7 @@ def test_core_listing_filters(temp_db):
 
     # Take and mark one as done
     core.take(consumer="worker", lane="lane1")
-    core.set_status(push1["id"], "done")
+    core.set_status(push1["id"], "done", force=True)
 
     # List pending only (default)
     listing = core.listing()
@@ -197,7 +197,7 @@ def test_core_touch_lease(temp_db):
     core.take(consumer="worker", lease=10)
 
     # Touch to renew
-    touch_result = core.touch(item_id, lease=30)
+    touch_result = core.touch(item_id, lease=30, force=True)
     assert touch_result["id"] == item_id
     assert touch_result["lease_until"]
 
@@ -269,12 +269,12 @@ def test_core_priority_ordering(temp_db):
     assert take1["id"] == p0["id"]
 
     # Release and take should get P1
-    core.set_status(p0["id"], "done")
+    core.set_status(p0["id"], "done", force=True)
     take2 = core.take(consumer="worker2")
     assert take2["id"] == p1["id"]
 
     # Release and take should get P2
-    core.set_status(p1["id"], "done")
+    core.set_status(p1["id"], "done", force=True)
     take3 = core.take(consumer="worker3")
     assert take3["id"] == p2["id"]
 
@@ -286,7 +286,7 @@ def test_core_blocked_by_dependencies(temp_db):
     child = core.push("child_work")
 
     # Defer child blocked by parent
-    defer_result = core.defer(child["id"], blocked_by=[str(parent["id"])])
+    defer_result = core.defer(child["id"], blocked_by=[str(parent["id"])], force=True)
     assert defer_result["status"] == "deferred"
     assert "blocked_by" in defer_result
 
@@ -296,7 +296,7 @@ def test_core_blocked_by_dependencies(temp_db):
     assert peek["id"] == parent["id"]
 
     # Mark parent as done (terminal)
-    core.set_status(parent["id"], "done")
+    core.set_status(parent["id"], "done", force=True)
 
     # Now peek should return the child (promoted from deferred)
     peek = core.peek()
@@ -330,7 +330,7 @@ def test_core_parked_excluded_from_reap(temp_db):
     core.take(consumer="worker", lease=1)
 
     # Park it
-    core.park(item_id)
+    core.park(item_id, force=True)
 
     # Wait for lease to expire
     import time
@@ -353,7 +353,7 @@ def test_core_set_status_to_pending_increments_requeue(temp_db):
 
     for i in range(3):
         core.take(consumer=f"worker{i}")
-        core.set_status(item_id, "pending")
+        core.set_status(item_id, "pending", force=True)
 
         show = core.show(item_id)
         assert show["requeue_count"] == i + 1
@@ -444,7 +444,7 @@ def test_grpc_take_respects_priority_in_response(temp_db):
     assert directive.priority == 1, f"Expected PRIORITY_P0=1, got {directive.priority}"
 
     # Mark as done, take P2
-    core.set_status(p0["id"], "done")
+    core.set_status(p0["id"], "done", force=True)
     take_result2 = core.take(consumer="worker", lease=30)
     full_record2 = core.show(take_result2["id"])
     directive2 = servicer._dict_to_directive(full_record2)
@@ -470,7 +470,7 @@ def test_grpc_take_includes_requeue_count(temp_db):
     assert directive.requeue_count == 0
 
     # Requeue it
-    core.set_status(item_id, "pending")
+    core.set_status(item_id, "pending", force=True)
 
     # Second take (requeue_count should be 1)
     core.take(consumer="worker2")

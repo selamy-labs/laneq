@@ -59,7 +59,9 @@ async def test_integration():
 
                 # Test Park
                 print("Testing Park...")
-                park_response = await stub.Park(laneq_pb2.ParkRequest(id=push_response.id, consumer="test-worker"))
+                park_response = await stub.Park(
+                    laneq_pb2.ParkRequest(id=push_response.id, consumer="test-worker", force=True)
+                )
                 print(f"  Parked directive #{park_response.id}")
                 assert park_response.status == laneq_pb2.STATUS_PARKED
 
@@ -78,7 +80,7 @@ async def test_integration():
                 # Test SetStatus
                 print("Testing SetStatus...")
                 set_status_response = await stub.SetStatus(
-                    laneq_pb2.SetStatusRequest(id=push_response.id, status=laneq_pb2.STATUS_DONE)
+                    laneq_pb2.SetStatusRequest(id=push_response.id, status=laneq_pb2.STATUS_DONE, force=True)
                 )
                 print(f"  Set status to {set_status_response.status}")
                 assert set_status_response.status == laneq_pb2.STATUS_DONE
