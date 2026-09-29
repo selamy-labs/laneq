@@ -418,9 +418,7 @@ def test_claim_token_fences_stale_worker_after_reassignment(tmp_path: Path) -> N
         stale = run_q(db, command, "1", "--claim-token", first["claim_token"])
         assert stale.returncode == 1
         assert "no longer active" in stale.stderr or "no active claim" in stale.stderr
-        assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [
-            ("taken", second["claim_token"])
-        ]
+        assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("taken", second["claim_token"])]
 
     assert run_q(db, "touch", "1", "--claim-token", second["claim_token"], "--lease", "1h").returncode == 0
     assert run_q(db, "done", "1", "--claim-token", second["claim_token"]).returncode == 0
