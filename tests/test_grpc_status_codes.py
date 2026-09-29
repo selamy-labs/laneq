@@ -42,7 +42,7 @@ class TestGRPCStatusCodeMapping:
     def test_touch_missing_item_raises_not_found(self, temp_db):
         """Touch on non-existent ID raises NotFoundError."""
         with pytest.raises(NotFoundError, match="no item"):
-            core.touch(9999, lease=1800)
+            core.touch(9999, lease=1800, force=True)
 
     def test_touch_pending_item_raises_failed_precondition(self, temp_db):
         """Touch on pending (not taken) item raises PreconditionError."""
@@ -52,7 +52,7 @@ class TestGRPCStatusCodeMapping:
 
         # Touch it (it's pending, not taken)
         with pytest.raises(PreconditionError, match="no taken item"):
-            core.touch(item_id, lease=1800)
+            core.touch(item_id, lease=1800, force=True)
 
     def test_unpark_missing_item_raises_not_found(self, temp_db):
         """Unpark on non-existent ID raises NotFoundError."""
@@ -72,7 +72,7 @@ class TestGRPCStatusCodeMapping:
     def test_park_missing_item_raises_not_found(self, temp_db):
         """Park on non-existent ID raises NotFoundError."""
         with pytest.raises(NotFoundError, match="no item"):
-            core.park(9999)
+            core.park(9999, force=True)
 
     def test_park_pending_item_raises_failed_precondition(self, temp_db):
         """Park on pending (not taken) item raises PreconditionError."""
@@ -82,7 +82,7 @@ class TestGRPCStatusCodeMapping:
 
         # Try to park it (it's pending, not taken)
         with pytest.raises(PreconditionError, match="no taken item"):
-            core.park(item_id)
+            core.park(item_id, force=True)
 
     def test_push_empty_body_raises_queue_error(self, temp_db):
         """Push with empty body raises QueueError (not a subclass)."""
@@ -97,7 +97,7 @@ class TestGRPCStatusCodeMapping:
     def test_set_status_missing_item_raises_not_found(self, temp_db):
         """SetStatus on non-existent ID raises NotFoundError."""
         with pytest.raises(NotFoundError, match="no item"):
-            core.set_status(9999, "done")
+            core.set_status(9999, "done", force=True)
 
     def test_defer_missing_dependency_raises_not_found(self, temp_db):
         """Defer with non-existent dependency raises NotFoundError."""
@@ -107,12 +107,12 @@ class TestGRPCStatusCodeMapping:
 
         # Try to defer it with a non-existent dependency
         with pytest.raises(NotFoundError, match="no dependency"):
-            core.defer(item_id, blocked_by=["9999"])
+            core.defer(item_id, blocked_by=["9999"], force=True)
 
     def test_defer_missing_item_raises_not_found(self, temp_db):
         """Defer on non-existent ID raises NotFoundError."""
         with pytest.raises(NotFoundError, match="no item"):
-            core.defer(9999, until="2026-06-22T19:00:00Z")
+            core.defer(9999, until="2026-06-22T19:00:00Z", force=True)
 
     def test_defer_self_blocked_raises_queue_error(self, temp_db):
         """Defer with self-dependency raises QueueError (not subclass)."""
@@ -122,7 +122,7 @@ class TestGRPCStatusCodeMapping:
 
         # Try to block it on itself
         with pytest.raises(QueueError, match="cannot be blocked by itself"):
-            core.defer(item_id, blocked_by=[str(item_id)])
+            core.defer(item_id, blocked_by=[str(item_id)], force=True)
 
     def test_thread_status_missing_item_raises_not_found(self, temp_db):
         """ThreadStatus on non-existent ID raises NotFoundError."""

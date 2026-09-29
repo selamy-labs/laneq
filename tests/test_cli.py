@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -94,7 +96,7 @@ def test_push_next_done_stats(tmp_path: Path) -> None:
     assert taken.returncode == 0
     assert taken.stdout == "build a small thing"
     assert taken.stderr == "#1\n"
-    assert run_q(db, "done", "1").stdout == "#1 -> done\n"
+    assert run_q(db, "done", "--force", "1").stdout == "#1 -> done\n"
     stats = run_q(db, "stats")
     assert "P1  done     1" in stats.stdout
 
@@ -127,8 +129,8 @@ def test_peek_show_list_reprioritize_requeue_and_drop(tmp_path: Path) -> None:
     assert "low" in run_q(db, "show", "1").stdout
 
     assert run_q(db, "next").stdout == "low"
-    assert run_q(db, "requeue", "1").stdout == "#1 -> pending\n"
-    assert run_q(db, "drop", "1").stdout == "#1 -> dropped\n"
+    assert run_q(db, "requeue", "--force", "1").stdout == "#1 -> pending\n"
+    assert run_q(db, "drop", "--force", "1").stdout == "#1 -> dropped\n"
     all_rows = run_q(db, "list", "--all").stdout
     assert "#1" in all_rows
     # After requeue (setting to pending), requeue_count is incremented to 1
@@ -225,7 +227,7 @@ def test_missing_item_mutations_fail(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
 
     for command in ("done", "requeue", "drop"):
-        result = run_q(db, command, "404")
+        result = run_q(db, command, "404", "--force")
         assert result.returncode == 1
         assert "no item #404" in result.stderr
 
@@ -371,6 +373,42 @@ def test_migration_from_intermediate_schema_adds_remaining_columns(tmp_path: Pat
     assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
 
 
+def test_concurrent_first_open_replans_after_write_lock(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+    first_plans = threading.Barrier(2)
+    original_plan = cli.migration_plan
+    local = threading.local()
+
+    def simultaneous_plan(conn: sqlite3.Connection):
+        plan = original_plan(conn)
+        if not getattr(local, "planned", False):
+            local.planned = True
+            first_plans.wait(timeout=5)
+        return plan
+
+    monkeypatch.setattr(cli, "migration_plan", simultaneous_plan)
+
+    def open_and_migrate() -> list[str]:
+        conn = sqlite3.connect(db, timeout=5)
+        try:
+            return cli.migrate(conn, path=db).changes
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(open_and_migrate) for _ in range(2)]
+        changes = [future.result(timeout=10) for future in futures]
+
+    assert sum("add_claim_token" in plan for plan in changes) == 1
+    assert sum(not plan for plan in changes) == 1
+    assert "claim_token" in {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
+    backups = backup_files(db)
+    assert len(backups) == 1
+    assert "claim_token" not in {row[1] for row in rows(backups[0], "PRAGMA table_info(directives)")}
+    assert rows(backups[0], "PRAGMA integrity_check") == [("ok",)]
+
+
 def test_next_records_consumer_lease_and_touch_extends(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
     run_q(db, "push", "-p", "P0", "-b", "lease me")
@@ -389,12 +427,116 @@ def test_next_records_consumer_lease_and_touch_extends(tmp_path: Path) -> None:
     assert "consumers:\n  worker-a: 1" in run_q(db, "stats").stdout
 
     old_lease = stored[2]
-    touched = run_q(db, "touch", "1", "--lease", "1h")
+    touched = run_q(db, "touch", "--force", "1", "--lease", "1h")
 
     assert touched.returncode == 0
     new_lease = rows(db, "SELECT lease_until FROM directives WHERE id=1")[0][0]
     assert new_lease > old_lease
     assert f"#1 lease_until={new_lease}" in touched.stdout
+
+
+def test_claim_token_fences_stale_worker_after_reassignment(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    assert run_q(db, "push", "-b", "one job").returncode == 0
+    first = json.loads(run_q(db, "next", "--json", "--consumer", "same-worker").stdout)
+    assert first["id"] == 1
+    assert first["body"] == "one job"
+    assert first["claim_token"]
+
+    # Simulate a crashed worker whose lease expires before another worker claims the same item.
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+    second = json.loads(run_q(db, "next", "--json", "--consumer", "same-worker").stdout)
+    assert second["claim_token"] != first["claim_token"]
+
+    for command in ("done", "requeue", "drop", "touch", "defer"):
+        args = ("--for", "1h") if command == "defer" else ()
+        unguarded = run_q(db, command, "1", *args)
+        assert unguarded.returncode == 1
+        assert "claim token required" in unguarded.stderr
+        assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("taken", second["claim_token"])]
+
+    for command in ("done", "requeue", "drop", "touch", "defer"):
+        args = ("--for", "1h") if command == "defer" else ()
+        stale = run_q(db, command, "1", "--claim-token", first["claim_token"], *args)
+        assert stale.returncode == 1
+        assert "no longer active" in stale.stderr or "no active claim" in stale.stderr
+        assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("taken", second["claim_token"])]
+
+    assert run_q(db, "touch", "1", "--claim-token", second["claim_token"], "--lease", "1h").returncode == 0
+    assert run_q(db, "done", "1", "--claim-token", second["claim_token"]).returncode == 0
+    assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("done", None)]
+
+
+def test_reclaim_holds_write_lock_before_selecting_expired_claims(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-b", "one job")
+    run_q(db, "next", "--json")
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+
+    monkeypatch.setenv("LANEQ_DB", str(db))
+    reclaimer = cli.connect()
+    blocked: list[bool] = []
+
+    def check_lock(statement: str) -> None:
+        if not statement.startswith(
+            (
+                "SELECT id, taken_by, lease_until FROM directives",
+                "SELECT id, not_before, blocked_by FROM directives",
+            )
+        ):
+            return
+        contender = sqlite3.connect(db, timeout=0)
+        try:
+            contender.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError:
+            blocked.append(True)
+        else:
+            contender.rollback()
+            blocked.append(False)
+        finally:
+            contender.close()
+
+    reclaimer.set_trace_callback(check_lock)
+    try:
+        assert cli.reclaim_expired_leases(reclaimer) == 1
+    finally:
+        reclaimer.close()
+    assert blocked == [True]
+    assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("pending", None)]
+
+    run_q(db, "push", "-b", "deferred job")
+    run_q(db, "defer", "--force", "2", "--until", "2999-01-01T00:00:00Z")
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET not_before='2026-01-01T00:00:00Z' WHERE id=2")
+    con.commit()
+    con.close()
+    reclaimer = cli.connect()
+    reclaimer.set_trace_callback(check_lock)
+    try:
+        assert cli.reclaim_deferred(reclaimer) == 1
+    finally:
+        reclaimer.close()
+    assert blocked == [True, True]
+    assert rows(db, "SELECT status FROM directives WHERE id=2") == [("pending",)]
+
+
+def test_claim_token_rejects_expired_lease_before_reassignment(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-b", "one job")
+    claim = json.loads(run_q(db, "next", "--json").stdout)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+
+    assert run_q(db, "done", "1", "--claim-token", claim["claim_token"]).returncode == 1
+    assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("pending", None)]
 
 
 def test_expired_lease_lazy_reclaim_requeues_and_tracks_count(tmp_path: Path) -> None:
@@ -449,7 +591,7 @@ def test_defer_until_keeps_future_work_out_of_next(tmp_path: Path) -> None:
     run_q(db, "push", "-p", "P0", "-b", "future")
     run_q(db, "push", "-p", "P1", "-b", "ready")
 
-    deferred = run_q(db, "defer", "1", "--until", "2999-01-01T00:00:00Z")
+    deferred = run_q(db, "defer", "--force", "1", "--until", "2999-01-01T00:00:00Z")
 
     assert deferred.returncode == 0
     assert "#1 -> deferred not_before=2999-01-01T00:00:00Z" in deferred.stdout
@@ -465,7 +607,7 @@ def test_defer_for_past_duration_reclaims_on_next_operation(tmp_path: Path) -> N
     db = tmp_path / "queue.db"
     run_q(db, "push", "-p", "P0", "-b", "soon")
 
-    assert run_q(db, "defer", "1", "--for", "1").returncode == 0
+    assert run_q(db, "defer", "--force", "1", "--for", "1").returncode == 0
     con = sqlite3.connect(db)
     con.execute("UPDATE directives SET not_before='2026-01-01T00:00:00Z' WHERE id=1")
     con.commit()
@@ -481,14 +623,14 @@ def test_defer_blocked_by_dependency_releases_after_terminal_status(tmp_path: Pa
     run_q(db, "push", "-p", "P0", "-b", "blocked child")
     run_q(db, "push", "-p", "P1", "-b", "fallback")
 
-    deferred = run_q(db, "defer", "2", "--blocked-by", "1")
+    deferred = run_q(db, "defer", "--force", "2", "--blocked-by", "1")
 
     assert deferred.returncode == 0
     assert "#2 -> deferred blocked_by=1" in deferred.stdout
     assert run_q(db, "next").stdout == "dependency"
     assert run_q(db, "next").stdout == "fallback"
 
-    run_q(db, "done", "1")
+    run_q(db, "done", "--force", "1")
     assert run_q(db, "next").stdout == "blocked child"
     assert rows(db, "SELECT id,status,blocked_by FROM directives ORDER BY id") == [
         (1, "done", None),
@@ -501,15 +643,15 @@ def test_defer_rejects_invalid_or_missing_dependencies(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
     run_q(db, "push", "-b", "body")
 
-    self_dep = run_q(db, "defer", "1", "--blocked-by", "1")
+    self_dep = run_q(db, "defer", "--force", "1", "--blocked-by", "1")
     assert self_dep.returncode == 1
     assert "cannot be blocked by itself" in self_dep.stderr
 
-    missing = run_q(db, "defer", "1", "--blocked-by", "99")
+    missing = run_q(db, "defer", "--force", "1", "--blocked-by", "99")
     assert missing.returncode == 1
     assert "no dependency #99" in missing.stderr
 
-    no_gate = run_q(db, "defer", "1")
+    no_gate = run_q(db, "defer", "--force", "1")
     assert no_gate.returncode == 1
     assert "defer requires --until, --for, or --blocked-by" in no_gate.stderr
 
@@ -531,9 +673,9 @@ def test_threading_parent_show_list_and_status(tmp_path: Path) -> None:
     open_status = run_q(db, "thread-status", "2").stdout
     assert "thread #1 open total=3 open=3" in open_status
 
-    run_q(db, "done", "1")
-    run_q(db, "done", "2")
-    run_q(db, "drop", "3")
+    run_q(db, "done", "--force", "1")
+    run_q(db, "done", "--force", "2")
+    run_q(db, "drop", "--force", "3")
 
     assert run_q(db, "thread-status", "1").stdout == "thread #1 done total=3 open=0\n"
 
@@ -541,7 +683,7 @@ def test_threading_parent_show_list_and_status(tmp_path: Path) -> None:
 def test_touch_missing_item_reports_error(tmp_path: Path) -> None:
     db = tmp_path / "queue.db"
 
-    result = run_q(db, "touch", "404")
+    result = run_q(db, "touch", "--force", "404")
 
     assert result.returncode == 1
     assert "no item #404" in result.stderr
@@ -562,7 +704,7 @@ def test_touch_not_taken_item_reports_error(tmp_path: Path) -> None:
     item_id = output_line.split("#")[1].split()[0]
 
     # Try to touch it without taking it first
-    result = run_q(db, "touch", item_id)
+    result = run_q(db, "touch", "--force", item_id)
 
     assert result.returncode == 1
     assert f"no taken item #{item_id}" in result.stderr

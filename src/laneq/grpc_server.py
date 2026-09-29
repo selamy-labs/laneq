@@ -152,6 +152,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             response.lane = lane
 
             if result:
+                response.claim_token = result["claim_token"]
                 # Fetch the full directive record (core.take() returns only {id, body})
                 full_record = core.show(result["id"])
                 # Use the full converter so all fields are present and correct
@@ -251,7 +252,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         try:
             item_id = int(request.id)
             status = self._status_from_proto(request.status)
-            result = core.set_status(item_id, status)
+            result = core.set_status(item_id, status, claim_token=request.claim_token or None, force=request.force)
 
             response = laneq_pb2.SetStatusResponse()
             response.id = str(result["id"])
@@ -281,7 +282,14 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             blocked_by = list(request.blocked_by) if request.blocked_by else None
 
-            result = core.defer(item_id, until=until, delay=delay, blocked_by=blocked_by)
+            result = core.defer(
+                item_id,
+                until=until,
+                delay=delay,
+                blocked_by=blocked_by,
+                claim_token=request.claim_token or None,
+                force=request.force,
+            )
 
             response = laneq_pb2.DeferResponse()
             response.id = str(result["id"])
@@ -305,7 +313,9 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             item_id = int(request.id)
             lease_seconds = max(1, request.lease_duration_ms // 1000) if request.lease_duration_ms else 1800
 
-            result = core.touch(item_id, lease=lease_seconds)
+            result = core.touch(
+                item_id, lease=lease_seconds, claim_token=request.claim_token or None, force=request.force
+            )
 
             response = laneq_pb2.TouchResponse()
             response.id = str(result["id"])
@@ -390,7 +400,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         """Move a claimed directive into parked status (durable hold)."""
         try:
             item_id = int(request.id)
-            result = core.park(item_id)
+            result = core.park(item_id, claim_token=request.claim_token or None, force=request.force)
 
             response = laneq_pb2.ParkResponse()
             response.id = str(result["id"])

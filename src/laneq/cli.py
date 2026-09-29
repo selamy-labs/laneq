@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
-import shutil
 import sqlite3
 import sys
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +35,7 @@ BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
             taken_at TEXT,
             done_at TEXT,
             taken_by TEXT,
+            claim_token TEXT,
             lease_until TEXT,
             requeue_count INTEGER NOT NULL DEFAULT 0,
             parent_id INTEGER REFERENCES directives(id),
@@ -43,6 +45,7 @@ BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
         )"""
 SCHEMA_MIGRATIONS = {
     "taken_by": "ALTER TABLE directives ADD COLUMN taken_by TEXT",
+    "claim_token": "ALTER TABLE directives ADD COLUMN claim_token TEXT",
     "lease_until": "ALTER TABLE directives ADD COLUMN lease_until TEXT",
     "requeue_count": "ALTER TABLE directives ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0",
     "parent_id": "ALTER TABLE directives ADD COLUMN parent_id INTEGER REFERENCES directives(id)",
@@ -165,11 +168,17 @@ def make_backup_path(path: Path) -> Path:
     return candidate
 
 
-def backup_database(conn: sqlite3.Connection, path: Path, keep_backups: int) -> tuple[Path, list[Path]]:
-    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+def backup_database(path: Path, keep_backups: int) -> tuple[Path, list[Path]]:
+    # The caller holds BEGIN IMMEDIATE. A separate reader can make an online
+    # backup of the committed pre-migration state, including WAL pages.
     backup_path = make_backup_path(path)
-    shutil.copy2(path, backup_path)
-    verify_sqlite_integrity(backup_path)
+    try:
+        with closing(sqlite3.connect(path)) as source, closing(sqlite3.connect(backup_path)) as target:
+            source.backup(target)
+        verify_sqlite_integrity(backup_path)
+    except Exception:
+        backup_path.unlink(missing_ok=True)
+        raise
     pruned = prune_old_backups(path, keep_backups)
     return backup_path, pruned
 
@@ -191,12 +200,14 @@ def migrate(
 
     backup_path = None
     pruned: list[Path] = []
-    if path is not None and existed_before_open:
-        backup_path, pruned = backup_database(conn, path, keep_backups)
-
     changes: list[str] = []
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Another opener may have migrated the database while we waited for
+        # the write lock. Plan against the schema protected by this lock.
+        plan = migration_plan(conn)
+        if plan and path is not None and existed_before_open:
+            backup_path, pruned = backup_database(path, keep_backups)
         for step, (name, sql, params) in enumerate(plan, start=1):
             conn.execute(sql, params)
             changes.append(name)
@@ -244,11 +255,10 @@ def parse_duration(value: str | int | None, *, default: int = DEFAULT_LEASE_SECO
 
 
 def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: bool = True) -> int:
-    own_conn = conn is None
     conn = conn or connect()
     caller_had_transaction = conn.in_transaction
     now = utc_now()
-    if own_conn:
+    if not caller_had_transaction:
         conn.execute("BEGIN IMMEDIATE")
     rows = conn.execute(
         "SELECT id, taken_by, lease_until FROM directives "
@@ -256,22 +266,24 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
         "ORDER BY priority ASC, id ASC",
         (now,),
     ).fetchall()
-    for item_id, _, _ in rows:
-        conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
-            "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
-            (item_id,),
+    reclaimed = []
+    for item_id, taken_by, lease_until in rows:
+        cur = conn.execute(
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
+            "requeue_count=COALESCE(requeue_count,0)+1 "
+            "WHERE id=? AND status='taken' AND lease_until<=?",
+            (item_id, now),
         )
-    if own_conn:
+        if cur.rowcount:
+            reclaimed.append((item_id, taken_by, lease_until))
+    if not caller_had_transaction:
         conn.execute("COMMIT")
-    elif rows and not caller_had_transaction:
-        conn.commit()
     if not quiet:
-        if not rows:
+        if not reclaimed:
             print("laneq: no expired leases")
-        for item_id, taken_by, lease_until in rows:
+        for item_id, taken_by, lease_until in reclaimed:
             print(f"#{item_id} -> pending (expired lease_until={lease_until or '-'}, taken_by={taken_by or '-'})")
-    return len(rows)
+    return len(reclaimed)
 
 
 def parse_dependency_ids(value: str | None) -> list[int]:
@@ -302,11 +314,10 @@ def dependencies_satisfied(conn: sqlite3.Connection, blocked_by: str | None) -> 
 
 
 def reclaim_deferred(conn: sqlite3.Connection | None = None) -> int:
-    own_conn = conn is None
     conn = conn or connect()
     caller_had_transaction = conn.in_transaction
     now = utc_now()
-    if own_conn:
+    if not caller_had_transaction:
         conn.execute("BEGIN IMMEDIATE")
     rows = conn.execute(
         "SELECT id, not_before, blocked_by FROM directives WHERE status='deferred' ORDER BY priority ASC, id ASC"
@@ -319,14 +330,12 @@ def reclaim_deferred(conn: sqlite3.Connection | None = None) -> int:
             ready.append(int(item_id))
     for item_id in ready:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
-            "not_before=NULL, blocked_by=NULL WHERE id=?",
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
+            "not_before=NULL, blocked_by=NULL WHERE id=? AND status='deferred'",
             (item_id,),
         )
-    if own_conn:
+    if not caller_had_transaction:
         conn.execute("COMMIT")
-    elif ready and not caller_had_transaction:
-        conn.commit()
     return len(ready)
 
 
@@ -366,7 +375,7 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
             expired.append((item_id, taken_at, None if taken is None else int((now - taken).total_seconds())))
     for item_id, _, _ in expired:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
             "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
@@ -391,6 +400,9 @@ def cmd_next(args: argparse.Namespace) -> int:
     )
     if result is None:
         return EMPTY_EXIT_CODE
+    if args.json:
+        print(json.dumps(result))
+        return 0
     if args.id:
         print(f"#{result['id']}", file=sys.stderr)
     sys.stdout.write(result["body"])
@@ -525,11 +537,11 @@ def cmd_reprioritize(args: argparse.Namespace) -> int:
     return 0
 
 
-def set_status(item_id: int, status: str) -> int:
+def set_status(item_id: int, status: str, *, claim_token: str | None = None, force: bool = False) -> int:
     from laneq import core
 
     try:
-        core.set_status(item_id, status)
+        core.set_status(item_id, status, claim_token=claim_token, force=force)
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -538,15 +550,15 @@ def set_status(item_id: int, status: str) -> int:
 
 
 def cmd_done(args: argparse.Namespace) -> int:
-    return set_status(args.id, "done")
+    return set_status(args.id, "done", claim_token=args.claim_token, force=args.force)
 
 
 def cmd_requeue(args: argparse.Namespace) -> int:
-    return set_status(args.id, "pending")
+    return set_status(args.id, "pending", claim_token=args.claim_token, force=args.force)
 
 
 def cmd_drop(args: argparse.Namespace) -> int:
-    return set_status(args.id, "dropped")
+    return set_status(args.id, "dropped", claim_token=args.claim_token, force=args.force)
 
 
 def cmd_reap(args: argparse.Namespace) -> int:
@@ -561,7 +573,14 @@ def cmd_defer(args: argparse.Namespace) -> int:
     from laneq import core
 
     try:
-        result = core.defer(args.id, until=args.until, delay=args.delay, blocked_by=args.blocked_by)
+        result = core.defer(
+            args.id,
+            until=args.until,
+            delay=args.delay,
+            blocked_by=args.blocked_by,
+            claim_token=args.claim_token,
+            force=args.force,
+        )
     except (argparse.ArgumentTypeError, core.QueueError) as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -595,7 +614,7 @@ def cmd_touch(args: argparse.Namespace) -> int:
     from laneq import core
 
     try:
-        result = core.touch(args.id, lease=args.lease)
+        result = core.touch(args.id, lease=args.lease, claim_token=args.claim_token, force=args.force)
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -674,6 +693,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     next_parser = sub.add_parser("next")
     next_parser.add_argument("--id", action="store_true")
+    next_parser.add_argument(
+        "--json", action="store_true", help="print the claim, including its fencing token, as JSON"
+    )
     next_parser.add_argument("--reap-stale-seconds", type=int, nargs="?", const=DEFAULT_REAP_STALE_SECONDS)
     next_parser.add_argument(
         "--consumer", default=os.environ.get("LANEQ_CONSUMER", os.environ.get("CODEX_Q_CONSUMER", "-"))
@@ -703,10 +725,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     done = sub.add_parser("done")
     done.add_argument("id", type=int)
+    done.add_argument("--claim-token", help="only complete the active, unexpired claim with this token")
+    done.add_argument("--force", action="store_true", help="administrative override without a claim token")
     done.set_defaults(fn=cmd_done)
 
     requeue = sub.add_parser("requeue")
     requeue.add_argument("id", type=int)
+    requeue.add_argument("--claim-token", help="only requeue the active, unexpired claim with this token")
+    requeue.add_argument("--force", action="store_true", help="administrative override without a claim token")
     requeue.set_defaults(fn=cmd_requeue)
 
     defer = sub.add_parser("defer")
@@ -714,10 +740,14 @@ def build_parser() -> argparse.ArgumentParser:
     defer.add_argument("--until")
     defer.add_argument("--for", dest="delay")
     defer.add_argument("--blocked-by", action="append", default=[])
+    defer.add_argument("--claim-token", help="only defer the active, unexpired claim with this token")
+    defer.add_argument("--force", action="store_true", help="administrative override without a claim token")
     defer.set_defaults(fn=cmd_defer)
 
     drop = sub.add_parser("drop")
     drop.add_argument("id", type=int)
+    drop.add_argument("--claim-token", help="only drop the active, unexpired claim with this token")
+    drop.add_argument("--force", action="store_true", help="administrative override without a claim token")
     drop.set_defaults(fn=cmd_drop)
 
     reap = sub.add_parser("reap")
@@ -728,6 +758,8 @@ def build_parser() -> argparse.ArgumentParser:
     touch = sub.add_parser("touch")
     touch.add_argument("id", type=int)
     touch.add_argument("--lease", default=str(DEFAULT_LEASE_SECONDS))
+    touch.add_argument("--claim-token", help="only renew the active, unexpired claim with this token")
+    touch.add_argument("--force", action="store_true", help="administrative override without a claim token")
     touch.set_defaults(fn=cmd_touch)
 
     thread_status = sub.add_parser("thread-status")

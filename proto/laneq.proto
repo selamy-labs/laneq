@@ -76,6 +76,7 @@ message TakeResponse {
   Directive directive = 1; // The claimed directive; nil if none available
   string consumer = 2; // Echo of the requesting consumer
   string lane = 3;
+  string claim_token = 4; // Per-claim token required for worker mutations
 }
 
 // Peek request queries the next eligible directive without claiming.
@@ -134,6 +135,8 @@ message ReprioritizeResponse {
 message SetStatusRequest {
   string id = 1;
   Status status = 2; // Must be one of: pending (requeue), done, dropped
+  string claim_token = 3; // Token from TakeResponse for worker mutations
+  bool force = 4; // Explicit administrative override without a token
 }
 
 // SetStatus response confirms the change.
@@ -148,6 +151,8 @@ message DeferRequest {
   optional int64 until_unix = 2; // Unix timestamp; absent = use delay
   int64 delay_ms = 3; // Alternative to until_unix (milliseconds from now)
   repeated string blocked_by = 4; // Optional dependency list
+  string claim_token = 5;
+  bool force = 6;
 }
 
 // Defer response confirms the deferred status.
@@ -163,6 +168,8 @@ message TouchRequest {
   string id = 1;
   string consumer = 2; // Consumer holding the lease
   int64 lease_duration_ms = 3; // New lease duration
+  string claim_token = 4;
+  bool force = 5;
 }
 
 // Touch response returns the updated lease expiry.
@@ -219,6 +226,8 @@ message ThreadStatusResponse {
 message ParkRequest {
   string id = 1;
   string consumer = 2; // Consumer holding the lease
+  string claim_token = 3;
+  bool force = 4;
 }
 
 // Park response confirms the park.

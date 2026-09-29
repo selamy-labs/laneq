@@ -136,6 +136,16 @@ laneq reap --expired-leases
 Expired leases are reclaimed lazily on queue operations and increment the
 directive's `requeue_count`.
 
+For concurrent workers, use `next --json` and retain its `id` and
+`claim_token` alongside the directive body. Pass that token to `done`,
+`requeue`, `drop`, `defer`, or `touch` with `--claim-token`. A token is unique to one
+claim; a mutation fails if the lease expired or the directive was reclaimed
+and claimed again, even when the new claim uses the same consumer name. The
+check and mutation share one SQLite write transaction. Mutations without a
+token fail. Operators may use `--force` to override an active claim explicitly;
+workers must never use that administrative option. MCP and gRPC expose the same
+token and explicit `force` fields.
+
 Use lanes to isolate independent work streams inside the same SQLite database:
 
 ```bash
@@ -159,6 +169,7 @@ laneq thread-status 1
   and `--parent` to route and thread it.
 - `next`: atomically take the highest-priority pending directive and print its
   body; add `--consumer`, `--lease`, and `--lane` for multi-worker coordination.
+  `--json` returns the body, id, and fencing token for safe worker completion.
 - `peek`: print the next pending directive without taking it; add `--lane` to
   inspect a specific lane.
 - `show`: print any directive by id, including lane, thread, consumer, lease,
@@ -166,9 +177,12 @@ laneq thread-status 1
 - `list`: list pending directives; add `--all` to include non-pending items,
   `--lane` to filter a lane, or `--thread` to render a thread.
 - `reprioritize`: change a directive priority.
-- `done`, `requeue`, `drop`: update directive status.
-- `defer`: mark a directive deferred until a time, duration, or dependency ids.
-- `touch`: extend the lease for a taken directive.
+- `done`, `requeue`, `drop`: update directive status with the token from
+  `next --json`, or use `--force` for an administrative override.
+- `defer`: mark a directive deferred until a time, duration, or dependency ids;
+  requires a claim token or explicit `--force`.
+- `touch`: extend the lease for a taken directive with `--claim-token`, or use
+  `--force` for an administrative override.
 - `thread-status`: summarize whether a directive thread still has open work.
 - `reap`: requeue stale taken directives or expired leases.
 - `stats`: print counts by priority/status and taken counts by consumer.
@@ -179,16 +193,26 @@ Existing v0.1 databases migrate in place on first open. New columns are added
 for consumers, leases, lane names, parent links, deferral metadata, and requeue
 counts while preserving existing directive ids and statuses.
 
-Before any migration touches an existing database, `laneq` checkpoints WAL,
-copies `laneq.db` to `laneq.db.backup-<UTC>`, opens that backup, and requires
-`PRAGMA integrity_check` to return `ok`. The migration then runs in one
-transaction; on failure, SQLite rolls the original database back and the
-verified backup remains. Backup retention defaults to the last 5 copies and can
-be changed with `LANEQ_BACKUP_RETENTION` or `laneq migrate --keep-backups N`.
+Before any migration touches an existing database, `laneq` takes a SQLite
+write lock, checks the current schema, makes an online backup (including WAL
+pages) at `laneq.db.backup-<UTC>`, and requires `PRAGMA integrity_check` to
+return `ok`. The migration then runs under that lock; on failure, SQLite rolls
+the original database back and the verified backup remains. Backup retention
+defaults to the last 5 copies and can be changed with
+`LANEQ_BACKUP_RETENTION` or `laneq migrate --keep-backups N`.
 
 Use `laneq migrate --dry-run` to inspect planned schema/data changes without
 modifying the database. A successful explicit migration prints the changed
 steps and backup path.
+
+The claim-token change requires a coordinated cutover for a shared database.
+Before the first new `next`, stop every old CLI, MCP, and gRPC consumer and
+producer that can access that database, including scheduled jobs. Verify no
+old process can restart, install the new version for every account using the
+database, and restart only those versions. An old executable ignores claim
+tokens and can still update a new worker's claim by id. Keep multiworker
+dispatch paused until all clients are upgraded and a private stale-claim and
+crash/restart check has passed against the exact database route.
 
 `codex-q` remains as a compatibility command alias for existing local
 automation. Prefer `laneq` for new docs, scripts, and integrations.

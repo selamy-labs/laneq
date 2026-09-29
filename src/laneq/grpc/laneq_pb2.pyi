@@ -108,14 +108,16 @@ class TakeRequest(_message.Message):
     def __init__(self, consumer: _Optional[str] = ..., lane: _Optional[str] = ..., lease_duration_ms: _Optional[int] = ..., reap_stale_seconds: _Optional[int] = ...) -> None: ...
 
 class TakeResponse(_message.Message):
-    __slots__ = ("directive", "consumer", "lane")
+    __slots__ = ("directive", "consumer", "lane", "claim_token")
     DIRECTIVE_FIELD_NUMBER: _ClassVar[int]
     CONSUMER_FIELD_NUMBER: _ClassVar[int]
     LANE_FIELD_NUMBER: _ClassVar[int]
+    CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
     directive: Directive
     consumer: str
     lane: str
-    def __init__(self, directive: _Optional[_Union[Directive, _Mapping]] = ..., consumer: _Optional[str] = ..., lane: _Optional[str] = ...) -> None: ...
+    claim_token: str
+    def __init__(self, directive: _Optional[_Union[Directive, _Mapping]] = ..., consumer: _Optional[str] = ..., lane: _Optional[str] = ..., claim_token: _Optional[str] = ...) -> None: ...
 
 class PeekRequest(_message.Message):
     __slots__ = ("lane",)
@@ -186,12 +188,16 @@ class ReprioritizeResponse(_message.Message):
     def __init__(self, id: _Optional[str] = ..., priority: _Optional[_Union[Priority, str]] = ...) -> None: ...
 
 class SetStatusRequest(_message.Message):
-    __slots__ = ("id", "status")
+    __slots__ = ("id", "status", "claim_token", "force")
     ID_FIELD_NUMBER: _ClassVar[int]
     STATUS_FIELD_NUMBER: _ClassVar[int]
+    CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    FORCE_FIELD_NUMBER: _ClassVar[int]
     id: str
     status: Status
-    def __init__(self, id: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ...) -> None: ...
+    claim_token: str
+    force: bool
+    def __init__(self, id: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ..., claim_token: _Optional[str] = ..., force: _Optional[bool] = ...) -> None: ...
 
 class SetStatusResponse(_message.Message):
     __slots__ = ("id", "status")
@@ -202,16 +208,20 @@ class SetStatusResponse(_message.Message):
     def __init__(self, id: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ...) -> None: ...
 
 class DeferRequest(_message.Message):
-    __slots__ = ("id", "until_unix", "delay_ms", "blocked_by")
+    __slots__ = ("id", "until_unix", "delay_ms", "blocked_by", "claim_token", "force")
     ID_FIELD_NUMBER: _ClassVar[int]
     UNTIL_UNIX_FIELD_NUMBER: _ClassVar[int]
     DELAY_MS_FIELD_NUMBER: _ClassVar[int]
     BLOCKED_BY_FIELD_NUMBER: _ClassVar[int]
+    CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    FORCE_FIELD_NUMBER: _ClassVar[int]
     id: str
     until_unix: int
     delay_ms: int
     blocked_by: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, id: _Optional[str] = ..., until_unix: _Optional[int] = ..., delay_ms: _Optional[int] = ..., blocked_by: _Optional[_Iterable[str]] = ...) -> None: ...
+    claim_token: str
+    force: bool
+    def __init__(self, id: _Optional[str] = ..., until_unix: _Optional[int] = ..., delay_ms: _Optional[int] = ..., blocked_by: _Optional[_Iterable[str]] = ..., claim_token: _Optional[str] = ..., force: _Optional[bool] = ...) -> None: ...
 
 class DeferResponse(_message.Message):
     __slots__ = ("id", "status", "not_before_unix", "blocked_by")
@@ -226,14 +236,18 @@ class DeferResponse(_message.Message):
     def __init__(self, id: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ..., not_before_unix: _Optional[int] = ..., blocked_by: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class TouchRequest(_message.Message):
-    __slots__ = ("id", "consumer", "lease_duration_ms")
+    __slots__ = ("id", "consumer", "lease_duration_ms", "claim_token", "force")
     ID_FIELD_NUMBER: _ClassVar[int]
     CONSUMER_FIELD_NUMBER: _ClassVar[int]
     LEASE_DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    FORCE_FIELD_NUMBER: _ClassVar[int]
     id: str
     consumer: str
     lease_duration_ms: int
-    def __init__(self, id: _Optional[str] = ..., consumer: _Optional[str] = ..., lease_duration_ms: _Optional[int] = ...) -> None: ...
+    claim_token: str
+    force: bool
+    def __init__(self, id: _Optional[str] = ..., consumer: _Optional[str] = ..., lease_duration_ms: _Optional[int] = ..., claim_token: _Optional[str] = ..., force: _Optional[bool] = ...) -> None: ...
 
 class TouchResponse(_message.Message):
     __slots__ = ("id", "lease_until_unix")
@@ -313,12 +327,16 @@ class ThreadStatusResponse(_message.Message):
     def __init__(self, root: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ..., total: _Optional[int] = ..., open: _Optional[int] = ..., open_items: _Optional[_Iterable[_Union[ThreadItem, _Mapping]]] = ...) -> None: ...
 
 class ParkRequest(_message.Message):
-    __slots__ = ("id", "consumer")
+    __slots__ = ("id", "consumer", "claim_token", "force")
     ID_FIELD_NUMBER: _ClassVar[int]
     CONSUMER_FIELD_NUMBER: _ClassVar[int]
+    CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    FORCE_FIELD_NUMBER: _ClassVar[int]
     id: str
     consumer: str
-    def __init__(self, id: _Optional[str] = ..., consumer: _Optional[str] = ...) -> None: ...
+    claim_token: str
+    force: bool
+    def __init__(self, id: _Optional[str] = ..., consumer: _Optional[str] = ..., claim_token: _Optional[str] = ..., force: _Optional[bool] = ...) -> None: ...
 
 class ParkResponse(_message.Message):
     __slots__ = ("id", "status")

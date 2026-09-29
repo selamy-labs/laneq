@@ -116,6 +116,23 @@ async def test_take_handler_success(temp_db, servicer, mock_context):
     assert response.directive.id == str(push_result["id"])
     assert response.directive.status == laneq_pb2.STATUS_TAKEN
     assert response.directive.priority == laneq_pb2.PRIORITY_P0
+    assert response.claim_token
+
+
+@pytest.mark.asyncio
+async def test_grpc_status_requires_token_and_accepts_claimed_token(temp_db, servicer, mock_context):
+    core.push("work")
+    claim = await servicer.Take(laneq_pb2.TakeRequest(consumer="worker"), mock_context)
+    item_id = claim.directive.id
+    request = laneq_pb2.SetStatusRequest(id=item_id, status=laneq_pb2.STATUS_DONE)
+    with pytest.raises(grpc.RpcError):
+        await servicer.SetStatus(request, mock_context)
+    assert core.show(int(item_id))["status"] == "taken"
+
+    request.claim_token = claim.claim_token
+    response = await servicer.SetStatus(request, mock_context)
+    assert response.status == laneq_pb2.STATUS_DONE
+    assert core.show(int(item_id))["status"] == "done"
 
 
 @pytest.mark.asyncio
@@ -252,7 +269,7 @@ async def test_listing_handler_pending_only(temp_db, servicer, mock_context):
     push3 = core.push("work3")
 
     taken1 = core.take(consumer="worker", lane="default")  # Takes work1
-    core.set_status(taken1["id"], "done")
+    core.set_status(taken1["id"], "done", force=True)
 
     request = laneq_pb2.ListingRequest()
     response = await servicer.Listing(request, mock_context)
@@ -271,7 +288,7 @@ async def test_listing_handler_all_statuses(temp_db, servicer, mock_context):
     core.push("work2")
 
     taken = core.take(consumer="worker", lane="default")
-    core.set_status(taken["id"], "done")
+    core.set_status(taken["id"], "done", force=True)
 
     request = laneq_pb2.ListingRequest(all_statuses=True)
     response = await servicer.Listing(request, mock_context)
@@ -338,7 +355,7 @@ async def test_set_status_handler_success(temp_db, servicer, mock_context):
     push_result = core.push("work")
     item_id = str(push_result["id"])
 
-    request = laneq_pb2.SetStatusRequest(id=item_id, status=laneq_pb2.STATUS_DONE)
+    request = laneq_pb2.SetStatusRequest(id=item_id, status=laneq_pb2.STATUS_DONE, force=True)
     response = await servicer.SetStatus(request, mock_context)
 
     assert response.id == item_id
@@ -357,7 +374,7 @@ async def test_set_status_handler_requeue(temp_db, servicer, mock_context):
 
     core.take(consumer="worker")
 
-    request = laneq_pb2.SetStatusRequest(id=item_id, status=laneq_pb2.STATUS_PENDING)
+    request = laneq_pb2.SetStatusRequest(id=item_id, status=laneq_pb2.STATUS_PENDING, force=True)
     response = await servicer.SetStatus(request, mock_context)
 
     assert response.status == laneq_pb2.STATUS_PENDING
@@ -377,7 +394,7 @@ async def test_defer_handler_with_delay(temp_db, servicer, mock_context):
     push_result = core.push("work")
     item_id = str(push_result["id"])
 
-    request = laneq_pb2.DeferRequest(id=item_id, delay_ms=5000)
+    request = laneq_pb2.DeferRequest(id=item_id, delay_ms=5000, force=True)
     response = await servicer.Defer(request, mock_context)
 
     assert response.id == item_id
@@ -393,7 +410,7 @@ async def test_defer_handler_with_until_unix(temp_db, servicer, mock_context):
 
     future_unix = 2000000000  # Some future timestamp
 
-    request = laneq_pb2.DeferRequest(id=item_id, until_unix=future_unix)
+    request = laneq_pb2.DeferRequest(id=item_id, until_unix=future_unix, force=True)
     response = await servicer.Defer(request, mock_context)
 
     assert response.id == item_id
@@ -407,7 +424,7 @@ async def test_defer_handler_with_blocked_by(temp_db, servicer, mock_context):
     parent = core.push("parent")
     child = core.push("child")
 
-    request = laneq_pb2.DeferRequest(id=str(child["id"]), blocked_by=[str(parent["id"])])
+    request = laneq_pb2.DeferRequest(id=str(child["id"]), blocked_by=[str(parent["id"])], force=True)
     response = await servicer.Defer(request, mock_context)
 
     assert response.id == str(child["id"])
@@ -428,7 +445,7 @@ async def test_touch_handler_success(temp_db, servicer, mock_context):
 
     core.take(consumer="worker", lease=10)
 
-    request = laneq_pb2.TouchRequest(id=item_id, lease_duration_ms=60000)
+    request = laneq_pb2.TouchRequest(id=item_id, lease_duration_ms=60000, force=True)
     response = await servicer.Touch(request, mock_context)
 
     assert response.id == item_id
@@ -526,7 +543,7 @@ async def test_thread_status_handler_with_completed(temp_db, servicer, mock_cont
     core.push("child2", parent=parent["id"])
 
     # Mark one child as done
-    core.set_status(child1["id"], "done")
+    core.set_status(child1["id"], "done", force=True)
 
     request = laneq_pb2.ThreadStatusRequest(id=str(parent["id"]))
     response = await servicer.ThreadStatus(request, mock_context)
@@ -549,7 +566,7 @@ async def test_park_handler_success(temp_db, servicer, mock_context):
 
     core.take(consumer="worker", lease=30)
 
-    request = laneq_pb2.ParkRequest(id=item_id)
+    request = laneq_pb2.ParkRequest(id=item_id, force=True)
     response = await servicer.Park(request, mock_context)
 
     assert response.id == item_id
@@ -568,7 +585,7 @@ async def test_unpark_handler_success(temp_db, servicer, mock_context):
     item_id = str(push_result["id"])
 
     core.take(consumer="worker", lease=30)
-    core.park(item_id)
+    core.park(item_id, force=True)
 
     request = laneq_pb2.UnparkRequest(id=item_id)
     response = await servicer.Unpark(request, mock_context)
@@ -665,7 +682,7 @@ def test_dict_to_directive_with_timestamps(servicer, temp_db):
     item_id = push_result["id"]
 
     core.take(consumer="worker", lease=30)
-    core.set_status(item_id, "done")
+    core.set_status(item_id, "done", force=True)
 
     full_record = core.show(item_id)
     directive = servicer._dict_to_directive(full_record)
@@ -681,7 +698,7 @@ def test_dict_to_directive_with_blocked_by(servicer, temp_db):
     child = core.push("child")
 
     # Defer child blocked by parent
-    core.defer(child["id"], blocked_by=[str(parent["id"])])
+    core.defer(child["id"], blocked_by=[str(parent["id"])], force=True)
 
     full_record = core.show(child["id"])
     directive = servicer._dict_to_directive(full_record)
@@ -697,7 +714,7 @@ def test_dict_to_directive_with_not_before(servicer, temp_db):
     item_id = push_result["id"]
 
     # Defer with delay to set not_before
-    core.defer(item_id, delay=10)
+    core.defer(item_id, delay=10, force=True)
 
     full_record = core.show(item_id)
     directive = servicer._dict_to_directive(full_record)
@@ -797,7 +814,7 @@ async def test_reprioritize_handler_invalid_id(temp_db, servicer, mock_context):
 @pytest.mark.asyncio
 async def test_set_status_handler_invalid_id(temp_db, servicer, mock_context):
     """Test SetStatus RPC aborts on invalid ID."""
-    request = laneq_pb2.SetStatusRequest(id="not_a_number")
+    request = laneq_pb2.SetStatusRequest(id="not_a_number", force=True)
 
     with pytest.raises(grpc.RpcError):
         await servicer.SetStatus(request, mock_context)
@@ -808,7 +825,7 @@ async def test_set_status_handler_invalid_id(temp_db, servicer, mock_context):
 @pytest.mark.asyncio
 async def test_defer_handler_invalid_id(temp_db, servicer, mock_context):
     """Test Defer RPC aborts on invalid ID."""
-    request = laneq_pb2.DeferRequest(id="not_a_number")
+    request = laneq_pb2.DeferRequest(id="not_a_number", force=True)
 
     with pytest.raises(grpc.RpcError):
         await servicer.Defer(request, mock_context)
@@ -819,7 +836,7 @@ async def test_defer_handler_invalid_id(temp_db, servicer, mock_context):
 @pytest.mark.asyncio
 async def test_touch_handler_invalid_id(temp_db, servicer, mock_context):
     """Test Touch RPC aborts on invalid ID."""
-    request = laneq_pb2.TouchRequest(id="not_a_number")
+    request = laneq_pb2.TouchRequest(id="not_a_number", force=True)
 
     with pytest.raises(grpc.RpcError):
         await servicer.Touch(request, mock_context)
@@ -841,7 +858,7 @@ async def test_thread_status_handler_invalid_id(temp_db, servicer, mock_context)
 @pytest.mark.asyncio
 async def test_park_handler_invalid_id(temp_db, servicer, mock_context):
     """Test Park RPC aborts on invalid ID."""
-    request = laneq_pb2.ParkRequest(id="not_a_number")
+    request = laneq_pb2.ParkRequest(id="not_a_number", force=True)
 
     with pytest.raises(grpc.RpcError):
         await servicer.Park(request, mock_context)
