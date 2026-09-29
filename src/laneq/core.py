@@ -10,6 +10,7 @@ JSON. Neither layer reimplements any SQL.
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from typing import Any
 
 from laneq import cli
@@ -96,12 +97,13 @@ def take(
         conn.execute("COMMIT")
         return None
     lease_seconds = cli.parse_duration(lease)
+    claim_token = uuid.uuid4().hex
     conn.execute(
-        "UPDATE directives SET status='taken', taken_at=?, taken_by=?, lease_until=? WHERE id=?",
-        (cli.utc_now(), consumer, cli.utc_after(lease_seconds), row[0]),
+        "UPDATE directives SET status='taken', taken_at=?, taken_by=?, claim_token=?, lease_until=? WHERE id=?",
+        (cli.utc_now(), consumer, claim_token, cli.utc_after(lease_seconds), row[0]),
     )
     conn.execute("COMMIT")
-    return {"id": int(row[0]), "body": row[1], "consumer": consumer, "lane": lane}
+    return {"id": int(row[0]), "body": row[1], "consumer": consumer, "lane": lane, "claim_token": claim_token}
 
 
 def peek(*, lane: str = DEFAULT_LANE) -> dict[str, Any] | None:
@@ -230,30 +232,44 @@ def reprioritize(item_id: int, priority: str) -> dict[str, Any]:
     return {"id": item_id, "priority": priority}
 
 
-def set_status(item_id: int, status: str) -> dict[str, Any]:
+def set_status(item_id: int, status: str, *, claim_token: str | None = None) -> dict[str, Any]:
     """Set a directive's status (``done``, ``pending``/requeue, ``dropped``)."""
     conn = cli.connect()
+    if claim_token is not None:
+        if not claim_token:
+            raise QueueError("claim token must not be empty")
+        conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
     cli.reclaim_deferred(conn)
+    where = "id=?"
+    where_args: tuple[Any, ...] = (item_id,)
+    if claim_token is not None:
+        where += " AND status='taken' AND claim_token=? AND lease_until>?"
+        where_args += (claim_token, cli.utc_now())
     if status == "pending":
         cur = conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
-            "not_before=NULL, blocked_by=NULL, requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
-            (item_id,),
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
+            "not_before=NULL, blocked_by=NULL, requeue_count=COALESCE(requeue_count,0)+1 WHERE " + where,
+            where_args,
         )
     elif status == "done":
         cur = conn.execute(
-            "UPDATE directives SET status='done', done_at=?, taken_by=NULL, lease_until=NULL WHERE id=?",
-            (cli.utc_now(), item_id),
+            "UPDATE directives SET status='done', done_at=?, taken_by=NULL, claim_token=NULL, lease_until=NULL WHERE "
+            + where,
+            (cli.utc_now(), *where_args),
         )
     else:
         cur = conn.execute(
-            "UPDATE directives SET status=?, taken_at=?, taken_by=NULL, lease_until=NULL WHERE id=?",
-            (status, cli.utc_now(), item_id),
+            "UPDATE directives SET status=?, taken_at=?, taken_by=NULL, claim_token=NULL, lease_until=NULL WHERE "
+            + where,
+            (status, cli.utc_now(), *where_args),
         )
     conn.commit()
     if cur.rowcount == 0:
-        raise NotFoundError(f"no item #{item_id}")
+        existing = conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone()
+        if existing is None:
+            raise NotFoundError(f"no item #{item_id}")
+        raise PreconditionError(f"claim for item #{item_id} is no longer active")
     return {"id": item_id, "status": status}
 
 
@@ -289,7 +305,7 @@ def defer(
             raise NotFoundError(f"no dependency #{dep_id}")
     blocked_text = cli.format_dependency_ids(dep_ids)
     cur = conn.execute(
-        "UPDATE directives SET status='deferred', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+        "UPDATE directives SET status='deferred', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
         "not_before=?, blocked_by=? WHERE id=?",
         (not_before, blocked_text, item_id),
     )
@@ -299,14 +315,23 @@ def defer(
     return {"id": item_id, "status": "deferred", "not_before": not_before, "blocked_by": blocked_text}
 
 
-def touch(item_id: int, *, lease: str | int | None = None) -> dict[str, Any]:
+def touch(item_id: int, *, lease: str | int | None = None, claim_token: str | None = None) -> dict[str, Any]:
     """Extend the lease on a taken directive."""
     conn = cli.connect()
+    if claim_token is not None:
+        if not claim_token:
+            raise QueueError("claim token must not be empty")
+        conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
     cli.reclaim_deferred(conn)
+    where = "id=? AND status='taken'"
+    where_args: tuple[Any, ...] = (item_id,)
+    if claim_token is not None:
+        where += " AND claim_token=? AND lease_until>?"
+        where_args += (claim_token, cli.utc_now())
     cur = conn.execute(
-        "UPDATE directives SET lease_until=? WHERE id=? AND status='taken'",
-        (cli.utc_after(cli.parse_duration(lease)), item_id),
+        "UPDATE directives SET lease_until=? WHERE " + where,
+        (cli.utc_after(cli.parse_duration(lease)), *where_args),
     )
     conn.commit()
     if cur.rowcount == 0:
@@ -314,7 +339,7 @@ def touch(item_id: int, *, lease: str | int | None = None) -> dict[str, Any]:
         existing = conn.execute("SELECT id FROM directives WHERE id=?", (item_id,)).fetchone()
         if existing is None:
             raise NotFoundError(f"no item #{item_id}")
-        raise PreconditionError(f"no taken item #{item_id}")
+        raise PreconditionError(f"no active claim for item #{item_id}" if claim_token else f"no taken item #{item_id}")
     lease_until = conn.execute("SELECT lease_until FROM directives WHERE id=?", (item_id,)).fetchone()[0]
     return {"id": item_id, "lease_until": lease_until}
 
@@ -380,7 +405,7 @@ def park(item_id: int) -> dict[str, Any]:
     """Move a taken directive into parked status (durable hold, excluded from claim/peek/reap)."""
     conn = cli.connect()
     cur = conn.execute(
-        "UPDATE directives SET status=? WHERE id=? AND status='taken'",
+        "UPDATE directives SET status=?, claim_token=NULL WHERE id=? AND status='taken'",
         (PARKED_STATUS, item_id),
     )
     conn.commit()
@@ -398,7 +423,7 @@ def unpark(item_id: int) -> dict[str, Any]:
     conn = cli.connect()
     cur = conn.execute(
         (
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, "
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, "
             "lease_until=NULL WHERE id=? AND status=?"
         ),
         (item_id, PARKED_STATUS),

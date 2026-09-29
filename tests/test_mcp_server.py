@@ -68,9 +68,13 @@ def test_push_next_done_round_trip(tmp_path: Path) -> None:
     }
 
     taken = call(db, "laneq_next", {"consumer": "worker-a", "lease": "10m"})
-    assert taken == {"id": 1, "body": "build a small thing", "consumer": "worker-a", "lane": "default"}
+    assert taken["id"] == 1
+    assert taken["body"] == "build a small thing"
+    assert taken["consumer"] == "worker-a"
+    assert taken["lane"] == "default"
+    assert taken["claim_token"]
 
-    done = call(db, "laneq_done", {"id": 1})
+    done = call(db, "laneq_done", {"id": 1, "claim_token": taken["claim_token"]})
     assert done == {"id": 1, "status": "done"}
 
     stats = call(db, "laneq_stats")

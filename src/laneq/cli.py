@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import shutil
 import sqlite3
@@ -34,6 +35,7 @@ BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
             taken_at TEXT,
             done_at TEXT,
             taken_by TEXT,
+            claim_token TEXT,
             lease_until TEXT,
             requeue_count INTEGER NOT NULL DEFAULT 0,
             parent_id INTEGER REFERENCES directives(id),
@@ -43,6 +45,7 @@ BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
         )"""
 SCHEMA_MIGRATIONS = {
     "taken_by": "ALTER TABLE directives ADD COLUMN taken_by TEXT",
+    "claim_token": "ALTER TABLE directives ADD COLUMN claim_token TEXT",
     "lease_until": "ALTER TABLE directives ADD COLUMN lease_until TEXT",
     "requeue_count": "ALTER TABLE directives ADD COLUMN requeue_count INTEGER NOT NULL DEFAULT 0",
     "parent_id": "ALTER TABLE directives ADD COLUMN parent_id INTEGER REFERENCES directives(id)",
@@ -258,7 +261,7 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
     ).fetchall()
     for item_id, _, _ in rows:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
             "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
@@ -319,7 +322,7 @@ def reclaim_deferred(conn: sqlite3.Connection | None = None) -> int:
             ready.append(int(item_id))
     for item_id in ready:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
             "not_before=NULL, blocked_by=NULL WHERE id=?",
             (item_id,),
         )
@@ -366,7 +369,7 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
             expired.append((item_id, taken_at, None if taken is None else int((now - taken).total_seconds())))
     for item_id, _, _ in expired:
         conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, lease_until=NULL, "
+            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
             "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
             (item_id,),
         )
@@ -391,6 +394,9 @@ def cmd_next(args: argparse.Namespace) -> int:
     )
     if result is None:
         return EMPTY_EXIT_CODE
+    if args.json:
+        print(json.dumps(result))
+        return 0
     if args.id:
         print(f"#{result['id']}", file=sys.stderr)
     sys.stdout.write(result["body"])
@@ -525,11 +531,11 @@ def cmd_reprioritize(args: argparse.Namespace) -> int:
     return 0
 
 
-def set_status(item_id: int, status: str) -> int:
+def set_status(item_id: int, status: str, *, claim_token: str | None = None) -> int:
     from laneq import core
 
     try:
-        core.set_status(item_id, status)
+        core.set_status(item_id, status, claim_token=claim_token)
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -538,15 +544,15 @@ def set_status(item_id: int, status: str) -> int:
 
 
 def cmd_done(args: argparse.Namespace) -> int:
-    return set_status(args.id, "done")
+    return set_status(args.id, "done", claim_token=args.claim_token)
 
 
 def cmd_requeue(args: argparse.Namespace) -> int:
-    return set_status(args.id, "pending")
+    return set_status(args.id, "pending", claim_token=args.claim_token)
 
 
 def cmd_drop(args: argparse.Namespace) -> int:
-    return set_status(args.id, "dropped")
+    return set_status(args.id, "dropped", claim_token=args.claim_token)
 
 
 def cmd_reap(args: argparse.Namespace) -> int:
@@ -595,7 +601,7 @@ def cmd_touch(args: argparse.Namespace) -> int:
     from laneq import core
 
     try:
-        result = core.touch(args.id, lease=args.lease)
+        result = core.touch(args.id, lease=args.lease, claim_token=args.claim_token)
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -674,6 +680,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     next_parser = sub.add_parser("next")
     next_parser.add_argument("--id", action="store_true")
+    next_parser.add_argument(
+        "--json", action="store_true", help="print the claim, including its fencing token, as JSON"
+    )
     next_parser.add_argument("--reap-stale-seconds", type=int, nargs="?", const=DEFAULT_REAP_STALE_SECONDS)
     next_parser.add_argument(
         "--consumer", default=os.environ.get("LANEQ_CONSUMER", os.environ.get("CODEX_Q_CONSUMER", "-"))
@@ -703,10 +712,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     done = sub.add_parser("done")
     done.add_argument("id", type=int)
+    done.add_argument("--claim-token", help="only complete the active, unexpired claim with this token")
     done.set_defaults(fn=cmd_done)
 
     requeue = sub.add_parser("requeue")
     requeue.add_argument("id", type=int)
+    requeue.add_argument("--claim-token", help="only requeue the active, unexpired claim with this token")
     requeue.set_defaults(fn=cmd_requeue)
 
     defer = sub.add_parser("defer")
@@ -718,6 +729,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     drop = sub.add_parser("drop")
     drop.add_argument("id", type=int)
+    drop.add_argument("--claim-token", help="only drop the active, unexpired claim with this token")
     drop.set_defaults(fn=cmd_drop)
 
     reap = sub.add_parser("reap")
@@ -728,6 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
     touch = sub.add_parser("touch")
     touch.add_argument("id", type=int)
     touch.add_argument("--lease", default=str(DEFAULT_LEASE_SECONDS))
+    touch.add_argument("--claim-token", help="only renew the active, unexpired claim with this token")
     touch.set_defaults(fn=cmd_touch)
 
     thread_status = sub.add_parser("thread-status")

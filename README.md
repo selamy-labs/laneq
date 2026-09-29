@@ -136,6 +136,15 @@ laneq reap --expired-leases
 Expired leases are reclaimed lazily on queue operations and increment the
 directive's `requeue_count`.
 
+For concurrent workers, use `next --json` and retain its `id` and
+`claim_token` alongside the directive body. Pass that token to `done`,
+`requeue`, `drop`, or `touch` with `--claim-token`. A token is unique to one
+claim; a mutation fails if the lease expired or the directive was reclaimed
+and claimed again, even when the new claim uses the same consumer name. The
+check and mutation share one SQLite write transaction. Commands without
+`--claim-token` retain their original administrative behavior and can override
+an active claim, so worker integrations must consistently use the token.
+
 Use lanes to isolate independent work streams inside the same SQLite database:
 
 ```bash
@@ -159,6 +168,7 @@ laneq thread-status 1
   and `--parent` to route and thread it.
 - `next`: atomically take the highest-priority pending directive and print its
   body; add `--consumer`, `--lease`, and `--lane` for multi-worker coordination.
+  `--json` returns the body, id, and fencing token for safe worker completion.
 - `peek`: print the next pending directive without taking it; add `--lane` to
   inspect a specific lane.
 - `show`: print any directive by id, including lane, thread, consumer, lease,
@@ -166,9 +176,11 @@ laneq thread-status 1
 - `list`: list pending directives; add `--all` to include non-pending items,
   `--lane` to filter a lane, or `--thread` to render a thread.
 - `reprioritize`: change a directive priority.
-- `done`, `requeue`, `drop`: update directive status.
+- `done`, `requeue`, `drop`: update directive status; workers should pass the
+  token from `next --json` as `--claim-token`.
 - `defer`: mark a directive deferred until a time, duration, or dependency ids.
-- `touch`: extend the lease for a taken directive.
+- `touch`: extend the lease for a taken directive; workers should pass
+  `--claim-token`.
 - `thread-status`: summarize whether a directive thread still has open work.
 - `reap`: requeue stale taken directives or expired leases.
 - `stats`: print counts by priority/status and taken counts by consumer.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import subprocess
@@ -395,6 +396,48 @@ def test_next_records_consumer_lease_and_touch_extends(tmp_path: Path) -> None:
     new_lease = rows(db, "SELECT lease_until FROM directives WHERE id=1")[0][0]
     assert new_lease > old_lease
     assert f"#1 lease_until={new_lease}" in touched.stdout
+
+
+def test_claim_token_fences_stale_worker_after_reassignment(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    assert run_q(db, "push", "-b", "one job").returncode == 0
+    first = json.loads(run_q(db, "next", "--json", "--consumer", "same-worker").stdout)
+    assert first["id"] == 1
+    assert first["body"] == "one job"
+    assert first["claim_token"]
+
+    # Simulate a crashed worker whose lease expires before another worker claims the same item.
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+    second = json.loads(run_q(db, "next", "--json", "--consumer", "same-worker").stdout)
+    assert second["claim_token"] != first["claim_token"]
+
+    for command in ("done", "requeue", "drop", "touch"):
+        stale = run_q(db, command, "1", "--claim-token", first["claim_token"])
+        assert stale.returncode == 1
+        assert "no longer active" in stale.stderr or "no active claim" in stale.stderr
+        assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [
+            ("taken", second["claim_token"])
+        ]
+
+    assert run_q(db, "touch", "1", "--claim-token", second["claim_token"], "--lease", "1h").returncode == 0
+    assert run_q(db, "done", "1", "--claim-token", second["claim_token"]).returncode == 0
+    assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("done", None)]
+
+
+def test_claim_token_rejects_expired_lease_before_reassignment(tmp_path: Path) -> None:
+    db = tmp_path / "queue.db"
+    run_q(db, "push", "-b", "one job")
+    claim = json.loads(run_q(db, "next", "--json").stdout)
+    con = sqlite3.connect(db)
+    con.execute("UPDATE directives SET lease_until='2026-01-01T00:00:00Z' WHERE id=1")
+    con.commit()
+    con.close()
+
+    assert run_q(db, "done", "1", "--claim-token", claim["claim_token"]).returncode == 1
+    assert rows(db, "SELECT status,claim_token FROM directives WHERE id=1") == [("pending", None)]
 
 
 def test_expired_lease_lazy_reclaim_requeues_and_tracks_count(tmp_path: Path) -> None:

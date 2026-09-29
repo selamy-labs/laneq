@@ -96,14 +96,14 @@ def laneq_reprioritize(id: int, priority: Priority) -> dict[str, Any]:
     return core.reprioritize(id, priority)
 
 
-def laneq_done(id: int) -> dict[str, Any]:
-    """Mark a directive done (completed)."""
-    return core.set_status(id, "done")
+def laneq_done(id: int, claim_token: str | None = None) -> dict[str, Any]:
+    """Mark a directive done. Workers should pass their claim token to reject stale claims."""
+    return core.set_status(id, "done", claim_token=claim_token)
 
 
-def laneq_requeue(id: int) -> dict[str, Any]:
+def laneq_requeue(id: int, claim_token: str | None = None) -> dict[str, Any]:
     """Return a directive to pending so it can be taken again."""
-    return core.set_status(id, "pending")
+    return core.set_status(id, "pending", claim_token=claim_token)
 
 
 def laneq_defer(
@@ -116,14 +116,16 @@ def laneq_defer(
     return core.defer(id, until=until, delay=delay, blocked_by=blocked_by)
 
 
-def laneq_drop(id: int) -> dict[str, Any]:
+def laneq_drop(id: int, claim_token: str | None = None) -> dict[str, Any]:
     """Drop a directive (terminal, not done)."""
-    return core.set_status(id, "dropped")
+    return core.set_status(id, "dropped", claim_token=claim_token)
 
 
-def laneq_touch(id: int, lease: str = str(core.DEFAULT_LEASE_SECONDS)) -> dict[str, Any]:
+def laneq_touch(
+    id: int, lease: str = str(core.DEFAULT_LEASE_SECONDS), claim_token: str | None = None
+) -> dict[str, Any]:
     """Extend the lease on a taken directive while still working it."""
-    return core.touch(id, lease=lease)
+    return core.touch(id, lease=lease, claim_token=claim_token)
 
 
 def laneq_reap(
