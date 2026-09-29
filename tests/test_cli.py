@@ -6,6 +6,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
@@ -370,6 +371,38 @@ def test_migration_from_intermediate_schema_adds_remaining_columns(tmp_path: Pat
     cols = {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
     assert {"taken_by", "lease_until", "requeue_count", "parent_id", "lane", "not_before", "blocked_by"} <= cols
     assert rows(db, "SELECT lane,requeue_count FROM directives WHERE id=1") == [("default", 0)]
+
+
+def test_concurrent_first_open_replans_after_write_lock(tmp_path: Path, monkeypatch) -> None:
+    db = tmp_path / "legacy.db"
+    create_legacy_v1_database(db)
+    first_plans = threading.Barrier(2)
+    original_plan = cli.migration_plan
+    local = threading.local()
+
+    def simultaneous_plan(conn: sqlite3.Connection):
+        plan = original_plan(conn)
+        if not getattr(local, "planned", False):
+            local.planned = True
+            first_plans.wait(timeout=5)
+        return plan
+
+    monkeypatch.setattr(cli, "migration_plan", simultaneous_plan)
+
+    def open_and_migrate() -> list[str]:
+        conn = sqlite3.connect(db, timeout=5)
+        try:
+            return cli.migrate(conn).changes
+        finally:
+            conn.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(open_and_migrate) for _ in range(2)]
+        changes = [future.result(timeout=10) for future in futures]
+
+    assert sum("add_claim_token" in plan for plan in changes) == 1
+    assert sum(not plan for plan in changes) == 1
+    assert "claim_token" in {row[1] for row in rows(db, "PRAGMA table_info(directives)")}
 
 
 def test_next_records_consumer_lease_and_touch_extends(tmp_path: Path) -> None:

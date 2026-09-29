@@ -204,6 +204,15 @@ Use `laneq migrate --dry-run` to inspect planned schema/data changes without
 modifying the database. A successful explicit migration prints the changed
 steps and backup path.
 
+The claim-token change requires a coordinated cutover for a shared database.
+Before the first new `next`, stop every old CLI, MCP, and gRPC consumer and
+producer that can access that database, including scheduled jobs. Verify no
+old process can restart, install the new version for every account using the
+database, and restart only those versions. An old executable ignores claim
+tokens and can still update a new worker's claim by id. Keep multiworker
+dispatch paused until all clients are upgraded and a private stale-claim and
+crash/restart check has passed against the exact database route.
+
 `codex-q` remains as a compatibility command alias for existing local
 automation. Prefer `laneq` for new docs, scripts, and integrations.
 

@@ -200,6 +200,9 @@ def migrate(
     changes: list[str] = []
     try:
         conn.execute("BEGIN IMMEDIATE")
+        # Another opener may have migrated the database while we waited for
+        # the write lock. Plan against the schema protected by this lock.
+        plan = migration_plan(conn)
         for step, (name, sql, params) in enumerate(plan, start=1):
             conn.execute(sql, params)
             changes.append(name)
