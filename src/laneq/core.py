@@ -9,6 +9,7 @@ JSON. Neither layer reimplements any SQL.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import uuid
 from typing import Any
@@ -42,6 +43,12 @@ def _priority_value(priority: str) -> int:
     return PRIORITIES[priority]
 
 
+def _recovery_policy(policy: str) -> str:
+    if policy not in ("requeue", "hold"):
+        raise QueueError("invalid recovery policy")
+    return policy
+
+
 def _claim_guard(claim_token: str | None, force: bool) -> tuple[str, tuple[Any, ...]]:
     """Require a live claim or an explicit administrative override for a mutation."""
     if claim_token is not None:
@@ -68,18 +75,21 @@ def push(
     priority: str = "P1",
     parent: int | None = None,
     lane: str = DEFAULT_LANE,
+    recovery_policy: str = "requeue",
 ) -> dict[str, Any]:
     """Enqueue a directive and return its stored representation."""
     if not body.strip():
         raise QueueError("empty body")
     priority_value = _priority_value(priority)
+    recovery_policy = _recovery_policy(recovery_policy)
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
     if not cli.parent_exists(conn, parent):
         raise NotFoundError(f"no parent #{parent}")
     cur = conn.execute(
-        "INSERT INTO directives(priority, body, status, created_at, parent_id, lane) VALUES(?, ?, 'pending', ?, ?, ?)",
-        (priority_value, body, cli.utc_now(), parent, lane),
+        "INSERT INTO directives(priority, body, status, created_at, parent_id, lane, recovery_policy) "
+        "VALUES(?, ?, 'pending', ?, ?, ?, ?)",
+        (priority_value, body, cli.utc_now(), parent, lane, recovery_policy),
     )
     conn.commit()
     return {
@@ -97,12 +107,14 @@ def take(
     consumer: str = "-",
     lease: str | int | None = None,
     lane: str = DEFAULT_LANE,
+    recovery_policy: str = "requeue",
     reap_stale_seconds: int | None = None,
 ) -> dict[str, Any] | None:
     """Atomically take the highest-priority pending directive in ``lane``.
 
     Returns ``None`` when the lane has no pending work.
     """
+    recovery_policy = _recovery_policy(recovery_policy)
     if reap_stale_seconds is not None:
         cli.reap_stale(reap_stale_seconds, quiet=True)
     conn = cli.connect()
@@ -110,31 +122,37 @@ def take(
     cli.reclaim_expired_leases(conn)
     cli.reclaim_deferred(conn)
     row = conn.execute(
-        "SELECT id, body FROM directives WHERE status='pending' AND lane=? ORDER BY priority ASC, id ASC LIMIT 1",
-        (lane,),
+        "SELECT id, body, recovery_policy FROM directives WHERE status='pending' AND lane=? AND recovery_policy=? "
+        "ORDER BY priority ASC, id ASC LIMIT 1",
+        (lane, recovery_policy),
     ).fetchone()
     if row is None:
         conn.execute("COMMIT")
         return None
     lease_seconds = cli.parse_duration(lease)
     claim_token = uuid.uuid4().hex
+    lease_until = cli.utc_after(lease_seconds)
     conn.execute(
         "UPDATE directives SET status='taken', taken_at=?, taken_by=?, claim_token=?, lease_until=? WHERE id=?",
-        (cli.utc_now(), consumer, claim_token, cli.utc_after(lease_seconds), row[0]),
+        (cli.utc_now(), consumer, claim_token, lease_until, row[0]),
     )
     conn.execute("COMMIT")
-    return {"id": int(row[0]), "body": row[1], "consumer": consumer, "lane": lane, "claim_token": claim_token}
+    result = {"id": int(row[0]), "body": row[1], "consumer": consumer, "lane": lane, "claim_token": claim_token}
+    if row[2] == "hold":
+        result.update(lease_until=lease_until, input_digest=hashlib.sha256(row[1].encode()).hexdigest())
+    return result
 
 
-def peek(*, lane: str = DEFAULT_LANE) -> dict[str, Any] | None:
+def peek(*, lane: str = DEFAULT_LANE, recovery_policy: str = "requeue") -> dict[str, Any] | None:
     """Return the next pending directive in ``lane`` without taking it."""
+    recovery_policy = _recovery_policy(recovery_policy)
     conn = cli.connect()
     cli.reclaim_expired_leases(conn)
     cli.reclaim_deferred(conn)
     row = conn.execute(
         "SELECT id, priority, body, lane FROM directives "
-        "WHERE status='pending' AND lane=? ORDER BY priority ASC, id ASC LIMIT 1",
-        (lane,),
+        "WHERE status='pending' AND lane=? AND recovery_policy=? ORDER BY priority ASC, id ASC LIMIT 1",
+        (lane, recovery_policy),
     ).fetchone()
     if row is None:
         return None
@@ -161,7 +179,8 @@ def show(item_id: int) -> dict[str, Any]:
     cli.reclaim_deferred(conn)
     row = conn.execute(
         "SELECT id, priority, status, created_at, taken_at, done_at, body, taken_by, "
-        "lease_until, requeue_count, parent_id, lane, not_before, blocked_by FROM directives WHERE id=?",
+        "lease_until, requeue_count, parent_id, lane, not_before, blocked_by, recovery_policy "
+        "FROM directives WHERE id=?",
         (item_id,),
     ).fetchone()
     if row is None:
@@ -181,6 +200,7 @@ def show(item_id: int) -> dict[str, Any]:
         "done_at": row[5],
         "not_before": row[12],
         "blocked_by": row[13],
+        "recovery_policy": row[14],
         "body": row[6],
         "thread": _thread_payload(conn, item_id) if has_thread else [],
     }
@@ -211,7 +231,7 @@ def listing(
     params: list[Any] = []
     query = (
         "SELECT id, priority, status, parent_id, body, taken_by, lease_until, requeue_count, lane, "
-        "not_before, blocked_by FROM directives"
+        "not_before, blocked_by, recovery_policy FROM directives"
     )
     where = []
     if not all_statuses:
@@ -235,6 +255,7 @@ def listing(
             "lane": r[8],
             "not_before": r[9],
             "blocked_by": r[10],
+            "recovery_policy": r[11],
             "summary": cli.first_line(r[4]),
         }
         for r in rows
@@ -256,6 +277,7 @@ def set_status(item_id: int, status: str, *, claim_token: str | None = None, for
     """Set a directive's status (``done``, ``pending``/requeue, ``dropped``)."""
     guard, guard_args = _claim_guard(claim_token, force)
     conn = cli.connect()
+    require_ordinary_directive(conn, item_id)
     if claim_token is not None:
         conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
@@ -284,6 +306,12 @@ def set_status(item_id: int, status: str, *, claim_token: str | None = None, for
     if cur.rowcount == 0:
         _raise_missing_or_inactive(conn, item_id)
     return {"id": item_id, "status": status}
+
+
+def require_ordinary_directive(conn: sqlite3.Connection, item_id: int) -> None:
+    row = conn.execute("SELECT recovery_policy FROM directives WHERE id=?", (item_id,)).fetchone()
+    if row is not None and row[0] == "hold":
+        raise PreconditionError("protected directive requires fenced handoff or verified recovery")
 
 
 def defer(
@@ -315,6 +343,7 @@ def defer(
     if item_id in dep_ids:
         raise QueueError("an item cannot be blocked by itself")
     conn = cli.connect()
+    require_ordinary_directive(conn, item_id)
     if claim_token is not None:
         conn.execute("BEGIN IMMEDIATE")
     cli.reclaim_expired_leases(conn)
@@ -424,7 +453,8 @@ def park(item_id: int, *, claim_token: str | None = None, force: bool = False) -
     if claim_token is not None:
         conn.execute("BEGIN IMMEDIATE")
     cur = conn.execute(
-        "UPDATE directives SET status=?, claim_token=NULL WHERE id=? AND status='taken'" + guard,
+        "UPDATE directives SET status=?, "
+        "claim_token=CASE recovery_policy WHEN 'hold' THEN claim_token END WHERE id=? AND status='taken'" + guard,
         (PARKED_STATUS, item_id, *guard_args),
     )
     conn.commit()
@@ -440,6 +470,7 @@ def park(item_id: int, *, claim_token: str | None = None, force: bool = False) -
 def unpark(item_id: int) -> dict[str, Any]:
     """Remove a directive from parked status (returns to pending)."""
     conn = cli.connect()
+    require_ordinary_directive(conn, item_id)
     cur = conn.execute(
         (
             "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, "

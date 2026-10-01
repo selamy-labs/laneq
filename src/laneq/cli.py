@@ -41,7 +41,8 @@ BASE_SCHEMA_SQL = f"""CREATE TABLE directives(
             parent_id INTEGER REFERENCES directives(id),
             lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}',
             not_before TEXT,
-            blocked_by TEXT
+            blocked_by TEXT,
+            recovery_policy TEXT NOT NULL DEFAULT 'requeue' CHECK(recovery_policy IN ('requeue','hold'))
         )"""
 SCHEMA_MIGRATIONS = {
     "taken_by": "ALTER TABLE directives ADD COLUMN taken_by TEXT",
@@ -52,7 +53,25 @@ SCHEMA_MIGRATIONS = {
     "lane": f"ALTER TABLE directives ADD COLUMN lane TEXT NOT NULL DEFAULT '{DEFAULT_LANE}'",
     "not_before": "ALTER TABLE directives ADD COLUMN not_before TEXT",
     "blocked_by": "ALTER TABLE directives ADD COLUMN blocked_by TEXT",
+    "recovery_policy": (
+        "ALTER TABLE directives ADD COLUMN recovery_policy TEXT NOT NULL DEFAULT 'requeue' "
+        "CHECK(recovery_policy IN ('requeue','hold'))"
+    ),
 }
+HANDOFF_SCHEMA_SQL = """CREATE TABLE handoff_receipts(
+    directive_id INTEGER PRIMARY KEY REFERENCES directives(id),
+    claim_token TEXT NOT NULL,
+    manifest_digest TEXT NOT NULL,
+    manifest_json TEXT NOT NULL,
+    receipt_json TEXT NOT NULL
+)"""
+ADMISSION_SCHEMA_SQL = """CREATE TABLE stage_admissions(
+    admission_key TEXT PRIMARY KEY,
+    directive_id INTEGER NOT NULL UNIQUE REFERENCES directives(id),
+    body_digest TEXT NOT NULL,
+    lane TEXT NOT NULL,
+    priority INTEGER NOT NULL
+)"""
 DATA_MIGRATIONS = [
     ("normalize_lane", "UPDATE directives SET lane=? WHERE lane IS NULL OR lane=''", (DEFAULT_LANE,)),
     ("normalize_requeue_count", "UPDATE directives SET requeue_count=0 WHERE requeue_count IS NULL", ()),
@@ -117,7 +136,7 @@ def directives_table_exists(conn: sqlite3.Connection) -> bool:
 
 def migration_plan(conn: sqlite3.Connection) -> list[tuple[str, str, tuple[Any, ...]]]:
     if not directives_table_exists(conn):
-        return [("create_directives", BASE_SCHEMA_SQL, ())]
+        return [("create_directives", BASE_SCHEMA_SQL, ()), *handoff_migration(conn)]
 
     columns = {row[1] for row in conn.execute("PRAGMA table_info(directives)").fetchall()}
     plan: list[tuple[str, str, tuple[Any, ...]]] = []
@@ -136,7 +155,16 @@ def migration_plan(conn: sqlite3.Connection) -> list[tuple[str, str, tuple[Any, 
     )
     if requeue_needs_default:
         plan.append(DATA_MIGRATIONS[1])
-    return plan
+    return [*plan, *handoff_migration(conn)]
+
+
+def handoff_migration(conn: sqlite3.Connection) -> list[tuple[str, str, tuple[Any, ...]]]:
+    tables = {"handoff_receipts": HANDOFF_SCHEMA_SQL, "stage_admissions": ADMISSION_SCHEMA_SQL}
+    return [
+        (f"create_{name}", sql, ())
+        for name, sql in tables.items()
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)).fetchone() is None
+    ]
 
 
 def verify_sqlite_integrity(path: Path) -> None:
@@ -274,13 +302,7 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
     ).fetchall()
     reclaimed = []
     for item_id, taken_by, lease_until in rows:
-        cur = conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
-            "requeue_count=COALESCE(requeue_count,0)+1 "
-            "WHERE id=? AND status='taken' AND lease_until<=?",
-            (item_id, now),
-        )
-        if cur.rowcount:
+        if release_or_hold(conn, item_id, expiry=now):
             reclaimed.append((item_id, taken_by, lease_until))
     if not caller_had_transaction:
         conn.execute("COMMIT")
@@ -288,8 +310,31 @@ def reclaim_expired_leases(conn: sqlite3.Connection | None = None, *, quiet: boo
         if not reclaimed:
             print("laneq: no expired leases")
         for item_id, taken_by, lease_until in reclaimed:
-            print(f"#{item_id} -> pending (expired lease_until={lease_until or '-'}, taken_by={taken_by or '-'})")
+            target = release_target(conn, item_id)
+            print(f"#{item_id} -> {target} (expired lease_until={lease_until or '-'}, taken_by={taken_by or '-'})")
     return len(reclaimed)
+
+
+def release_or_hold(conn: sqlite3.Connection, item_id: int, *, expiry: str | None = None) -> bool:
+    """Called under a write lock; protected executions retain reconciliation identity."""
+    guard = " AND lease_until<=?" if expiry is not None else ""
+    args = (item_id, expiry) if expiry is not None else (item_id,)
+    cur = conn.execute(
+        "UPDATE directives SET "
+        "status=CASE recovery_policy WHEN 'hold' THEN 'parked' ELSE 'pending' END, "
+        "taken_at=CASE recovery_policy WHEN 'hold' THEN taken_at END, "
+        "taken_by=CASE recovery_policy WHEN 'hold' THEN taken_by END, "
+        "claim_token=CASE recovery_policy WHEN 'hold' THEN claim_token END, "
+        "lease_until=CASE recovery_policy WHEN 'hold' THEN lease_until END, "
+        "requeue_count=COALESCE(requeue_count,0)+CASE recovery_policy WHEN 'hold' THEN 0 ELSE 1 END "
+        "WHERE id=? AND status='taken'" + guard,
+        args,
+    )
+    return cur.rowcount == 1
+
+
+def release_target(conn: sqlite3.Connection, item_id: int) -> str:
+    return str(conn.execute("SELECT status FROM directives WHERE id=?", (item_id,)).fetchone()[0])
 
 
 def parse_dependency_ids(value: str | None) -> list[int]:
@@ -353,10 +398,20 @@ def parent_exists(conn: sqlite3.Connection, parent_id: int | None) -> bool:
 
 def cmd_push(args: argparse.Namespace) -> int:
     from laneq import core
+    from laneq.stage_admission import admit
 
     body = read_body(args)
     try:
-        result = core.push(body, priority=args.priority, parent=args.parent, lane=args.lane)
+        if args.admission_key is not None:
+            if args.recovery_policy != "hold" or args.parent is not None:
+                raise core.QueueError(
+                    "stable root admission requires hold policy and no parent; use handoff for children"
+                )
+            result = admit(admission_key=args.admission_key, body=body, priority=args.priority, lane=args.lane)
+        else:
+            result = core.push(
+                body, priority=args.priority, parent=args.parent, lane=args.lane, recovery_policy=args.recovery_policy
+            )
     except core.QueueError as error:
         print(f"laneq: {error}", file=sys.stderr)
         return 1
@@ -380,18 +435,15 @@ def reap_stale(stale_seconds: int, *, quiet: bool = False) -> int:
         if taken is None or now - taken >= cutoff:
             expired.append((item_id, taken_at, None if taken is None else int((now - taken).total_seconds())))
     for item_id, _, _ in expired:
-        conn.execute(
-            "UPDATE directives SET status='pending', taken_at=NULL, taken_by=NULL, claim_token=NULL, lease_until=NULL, "
-            "requeue_count=COALESCE(requeue_count,0)+1 WHERE id=?",
-            (item_id,),
-        )
+        release_or_hold(conn, item_id)
     conn.execute("COMMIT")
     if not quiet:
         if not expired:
             print("laneq: no stale taken items")
         for item_id, taken_at, age in expired:
             detail = "unknown-age" if age is None else f"age_seconds={age}"
-            print(f"#{item_id} -> pending ({detail}, taken_at={taken_at or '-'})")
+            target = release_target(conn, item_id)
+            print(f"#{item_id} -> {target} ({detail}, taken_at={taken_at or '-'})")
     return len(expired)
 
 
@@ -403,6 +455,7 @@ def cmd_next(args: argparse.Namespace) -> int:
         lease=args.lease,
         lane=args.lane,
         reap_stale_seconds=args.reap_stale_seconds,
+        recovery_policy=args.recovery_policy,
     )
     if result is None:
         return EMPTY_EXIT_CODE
@@ -418,7 +471,7 @@ def cmd_next(args: argparse.Namespace) -> int:
 def cmd_peek(args: argparse.Namespace) -> int:
     from laneq import core
 
-    result = core.peek(lane=args.lane)
+    result = core.peek(lane=args.lane, recovery_policy=args.recovery_policy)
     if result is None:
         return EMPTY_EXIT_CODE
     lane = "" if result["lane"] == DEFAULT_LANE else f" lane={result['lane']}"
@@ -686,6 +739,8 @@ def cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from laneq.handoff_cli import register
+
     parser = argparse.ArgumentParser(prog="laneq")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -695,6 +750,8 @@ def build_parser() -> argparse.ArgumentParser:
     push.add_argument("-f", "--file")
     push.add_argument("--parent", type=int)
     push.add_argument("--lane", default=DEFAULT_LANE)
+    push.add_argument("--recovery-policy", choices=("requeue", "hold"), default="requeue")
+    push.add_argument("--admission-key", help="immutable stable identity for protected root admission")
     push.set_defaults(fn=cmd_push)
 
     next_parser = sub.add_parser("next")
@@ -708,10 +765,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     next_parser.add_argument("--lease", default=str(DEFAULT_LEASE_SECONDS))
     next_parser.add_argument("--lane", default=DEFAULT_LANE)
+    next_parser.add_argument("--recovery-policy", choices=("requeue", "hold"), default="requeue")
     next_parser.set_defaults(fn=cmd_next)
 
     peek = sub.add_parser("peek")
     peek.add_argument("--lane", default=DEFAULT_LANE)
+    peek.add_argument("--recovery-policy", choices=("requeue", "hold"), default="requeue")
     peek.set_defaults(fn=cmd_peek)
 
     show = sub.add_parser("show")
@@ -778,6 +837,7 @@ def build_parser() -> argparse.ArgumentParser:
     migrate_parser.set_defaults(fn=cmd_migrate)
 
     sub.add_parser("stats").set_defaults(fn=cmd_stats)
+    register(sub)
     return parser
 
 
