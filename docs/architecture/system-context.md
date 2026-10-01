@@ -21,7 +21,8 @@ flowchart LR
     laneq -.->|"Auto-instrumented telemetry when configured"| otlp
 ```
 
-All three interfaces call the queue operations in `laneq.core`. The CLI and
+All three interfaces use shared Python queue operations (`laneq.core` and the
+protected admission/handoff modules). The CLI and
 MCP server select the same local database through `LANEQ_DB` (or the legacy
 `CODEX_Q_DB` fallback). The gRPC server maps the protobuf service to those same
 operations and can optionally enforce PASETO grants plus per-request proofs;
