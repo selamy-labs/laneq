@@ -64,6 +64,7 @@ def test_real_machine_claim_inspect_renew_complete_and_exact_replay(db):
     admit()
     claim = take()
     assert claim["task_id"] == "sheet:task:revision:implementation"
+    assert claim["lane"] == "dev:implementation"
     assert claim["input_digest"] == hashlib.sha256(claim["body"].encode()).hexdigest()
     assert len(claim["claim_token"]) == 32
     assert stage_bridge.operate(frame(claim, "inspect"), OWNER) == claim

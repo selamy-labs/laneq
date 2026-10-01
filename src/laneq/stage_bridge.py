@@ -58,7 +58,7 @@ def request(value: object) -> dict[str, object]:
 def lookup(conn: sqlite3.Connection, task_id: str, owner: Owner) -> sqlite3.Row:
     conn.row_factory = sqlite3.Row
     row = conn.execute(
-        "SELECT d.id,d.body,d.claim_token,d.lease_until,a.body_digest,a.admission_key "
+        "SELECT d.id,d.body,d.claim_token,d.lease_until,a.body_digest,a.admission_key,a.lane "
         "FROM stage_admissions a JOIN directives d ON d.id=a.directive_id "
         "WHERE a.admission_key=? AND a.lane=? AND d.lane=? AND d.recovery_policy='hold'",
         (task_id, owner.lane, owner.lane),
@@ -73,6 +73,7 @@ def lookup(conn: sqlite3.Connection, task_id: str, owner: Owner) -> sqlite3.Row:
 def snapshot(row: sqlite3.Row) -> dict[str, object]:
     return {
         "task_id": row["admission_key"],
+        "lane": row["lane"],
         "claim_token": row["claim_token"],
         "input_digest": row["body_digest"],
         "lease_until": row["lease_until"],
