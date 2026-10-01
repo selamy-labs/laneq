@@ -13,7 +13,7 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 
-from laneq import core, root_reservations
+from laneq import core, root_inspection, root_reservations
 from laneq.handoff_contract import decode_manifest, digest_text, object_fields
 from laneq.reservation_contract import namespace_text, parse_reservation
 
@@ -31,10 +31,10 @@ class Owner:
         digest_text(self.reservation_digest)
 
 
-def operate(value: object, owner: Owner) -> dict[str, object]:
+def operate(value: object, owner: Owner) -> dict[str, object] | None:
     owner.validate()
     fields = object_fields(value, {"operation", "reservation"})
-    if fields["operation"] != "admit":
+    if fields["operation"] not in ("admit", "inspect"):
         raise core.QueueError("invalid admission operation")
     # Own the bounded snapshot: a caller cannot change its mutable input after
     # the digest check but before the transaction reparses the reservation.
@@ -46,6 +46,8 @@ def operate(value: object, owner: Owner) -> dict[str, object]:
         or reservation.digest != owner.reservation_digest
     ):
         raise core.PreconditionError("reservation is outside the pinned grant")
+    if fields["operation"] == "inspect":
+        return root_inspection.inspect(reservation)
     return root_reservations.admit(frozen)
 
 
