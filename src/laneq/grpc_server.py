@@ -6,6 +6,7 @@ and empty take/peek returns (directive unset in response).
 """
 
 import argparse
+import json
 import sys
 import time
 from datetime import datetime, timezone
@@ -13,9 +14,10 @@ from typing import Any
 
 import grpc
 
-from laneq import core
+from laneq import core, handoff, stage_admission
 from laneq.core import NotFoundError, PreconditionError, QueueError
 from laneq.grpc import laneq_pb2, laneq_pb2_grpc
+from laneq.handoff_contract import decode_manifest
 
 
 class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
@@ -76,6 +78,8 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         if parent is not None:
             directive.parent_id = str(parent)
         directive.requeue_count = d.get("requeue_count", 0)
+        if "recovery_policy" in d:
+            directive.recovery_hold = d["recovery_policy"] == "hold"
 
         # Convert timestamps from ISO format to Unix SECONDS
         created_at = d.get("created_at")
@@ -145,7 +149,13 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             lease_seconds = max(1, request.lease_duration_ms // 1000) if request.lease_duration_ms else 1800
             reap_stale = request.reap_stale_seconds if request.reap_stale_seconds > 0 else None
 
-            result = core.take(consumer=consumer, lease=lease_seconds, lane=lane, reap_stale_seconds=reap_stale)
+            result = core.take(
+                consumer=consumer,
+                lease=lease_seconds,
+                lane=lane,
+                reap_stale_seconds=reap_stale,
+                recovery_policy="hold" if request.recovery_hold else "requeue",
+            )
 
             response = laneq_pb2.TakeResponse()
             response.consumer = consumer
@@ -153,6 +163,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
 
             if result:
                 response.claim_token = result["claim_token"]
+                response.input_digest = result.get("input_digest", "")
                 # Fetch the full directive record (core.take() returns only {id, body})
                 full_record = core.show(result["id"])
                 # Use the full converter so all fields are present and correct
@@ -169,7 +180,7 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
         """Query the next eligible directive without claiming."""
         try:
             lane = request.lane or "default"
-            result = core.peek(lane=lane)
+            result = core.peek(lane=lane, recovery_policy="hold" if request.recovery_hold else "requeue")
 
             response = laneq_pb2.PeekResponse()
             if result:
@@ -182,6 +193,54 @@ class LaneqServicer(laneq_pb2_grpc.LaneqServicer):
             return response
         except core.QueueError as e:
             await context.abort(self._queue_error_code(e), str(e))
+
+    async def AdmitStage(
+        self, request: laneq_pb2.AdmitStageRequest, context: grpc.aio.ServicerContext
+    ) -> laneq_pb2.AdmitStageResponse:
+        """Admit protected root work using a stable immutable identity."""
+        try:
+            priorities = {0: "P1", 1: "P0", 2: "P1", 3: "P2"}
+            if request.priority not in priorities:
+                raise QueueError("invalid stage priority")
+            result = stage_admission.admit(
+                admission_key=request.admission_key,
+                body=request.body,
+                priority=priorities[request.priority],
+                lane=request.lane,
+            )
+            return laneq_pb2.AdmitStageResponse(directive=self._dict_to_directive(core.show(result["id"])))
+        except core.QueueError as error:
+            await context.abort(self._queue_error_code(error), str(error))
+
+    async def CompleteHandoff(
+        self, request: laneq_pb2.CompleteHandoffRequest, context: grpc.aio.ServicerContext
+    ) -> laneq_pb2.CompleteHandoffResponse:
+        """Expose the same strict manifest parser and transaction as the CLI."""
+        try:
+            result = handoff.complete(
+                int(request.id),
+                claim_token=request.claim_token,
+                manifest=decode_manifest(request.manifest_json.encode("utf-8")),
+            )
+            return laneq_pb2.CompleteHandoffResponse(receipt_json=json.dumps(result, sort_keys=True))
+        except core.QueueError as error:
+            await context.abort(self._queue_error_code(error), str(error))
+        except (ValueError, UnicodeError) as error:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
+
+    async def GetHandoffReceipt(
+        self, request: laneq_pb2.GetHandoffReceiptRequest, context: grpc.aio.ServicerContext
+    ) -> laneq_pb2.GetHandoffReceiptResponse:
+        """Observe durable settlement without re-executing or changing ownership."""
+        try:
+            result = handoff.get_receipt(int(request.id))
+            return laneq_pb2.GetHandoffReceiptResponse(
+                found=result is not None, receipt_json=json.dumps(result, sort_keys=True) if result is not None else ""
+            )
+        except core.QueueError as error:
+            await context.abort(self._queue_error_code(error), str(error))
+        except ValueError as error:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(error))
 
     async def Show(self, request: laneq_pb2.ShowRequest, context: grpc.aio.ServicerContext) -> laneq_pb2.ShowResponse:
         """Retrieve full details of a directive by ID."""

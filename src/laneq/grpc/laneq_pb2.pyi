@@ -36,7 +36,7 @@ STATUS_DROPPED: Status
 STATUS_PARKED: Status
 
 class Directive(_message.Message):
-    __slots__ = ("id", "priority", "body", "status", "lane", "created_at_unix", "taken_at_unix", "done_at_unix", "taken_by", "lease_until_unix", "requeue_count", "parent_id", "not_before_unix", "blocked_by")
+    __slots__ = ("id", "priority", "body", "status", "lane", "created_at_unix", "taken_at_unix", "done_at_unix", "taken_by", "lease_until_unix", "requeue_count", "parent_id", "not_before_unix", "blocked_by", "recovery_hold")
     ID_FIELD_NUMBER: _ClassVar[int]
     PRIORITY_FIELD_NUMBER: _ClassVar[int]
     BODY_FIELD_NUMBER: _ClassVar[int]
@@ -51,6 +51,7 @@ class Directive(_message.Message):
     PARENT_ID_FIELD_NUMBER: _ClassVar[int]
     NOT_BEFORE_UNIX_FIELD_NUMBER: _ClassVar[int]
     BLOCKED_BY_FIELD_NUMBER: _ClassVar[int]
+    RECOVERY_HOLD_FIELD_NUMBER: _ClassVar[int]
     id: str
     priority: Priority
     body: str
@@ -65,7 +66,8 @@ class Directive(_message.Message):
     parent_id: str
     not_before_unix: int
     blocked_by: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, id: _Optional[str] = ..., priority: _Optional[_Union[Priority, str]] = ..., body: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ..., lane: _Optional[str] = ..., created_at_unix: _Optional[int] = ..., taken_at_unix: _Optional[int] = ..., done_at_unix: _Optional[int] = ..., taken_by: _Optional[str] = ..., lease_until_unix: _Optional[int] = ..., requeue_count: _Optional[int] = ..., parent_id: _Optional[str] = ..., not_before_unix: _Optional[int] = ..., blocked_by: _Optional[_Iterable[str]] = ...) -> None: ...
+    recovery_hold: bool
+    def __init__(self, id: _Optional[str] = ..., priority: _Optional[_Union[Priority, str]] = ..., body: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ..., lane: _Optional[str] = ..., created_at_unix: _Optional[int] = ..., taken_at_unix: _Optional[int] = ..., done_at_unix: _Optional[int] = ..., taken_by: _Optional[str] = ..., lease_until_unix: _Optional[int] = ..., requeue_count: _Optional[int] = ..., parent_id: _Optional[str] = ..., not_before_unix: _Optional[int] = ..., blocked_by: _Optional[_Iterable[str]] = ..., recovery_hold: _Optional[bool] = ...) -> None: ...
 
 class PushRequest(_message.Message):
     __slots__ = ("body", "priority", "parent_id", "lane")
@@ -96,34 +98,40 @@ class PushResponse(_message.Message):
     def __init__(self, id: _Optional[str] = ..., priority: _Optional[_Union[Priority, str]] = ..., lane: _Optional[str] = ..., parent_id: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ..., summary: _Optional[str] = ...) -> None: ...
 
 class TakeRequest(_message.Message):
-    __slots__ = ("consumer", "lane", "lease_duration_ms", "reap_stale_seconds")
+    __slots__ = ("consumer", "lane", "lease_duration_ms", "reap_stale_seconds", "recovery_hold")
     CONSUMER_FIELD_NUMBER: _ClassVar[int]
     LANE_FIELD_NUMBER: _ClassVar[int]
     LEASE_DURATION_MS_FIELD_NUMBER: _ClassVar[int]
     REAP_STALE_SECONDS_FIELD_NUMBER: _ClassVar[int]
+    RECOVERY_HOLD_FIELD_NUMBER: _ClassVar[int]
     consumer: str
     lane: str
     lease_duration_ms: int
     reap_stale_seconds: int
-    def __init__(self, consumer: _Optional[str] = ..., lane: _Optional[str] = ..., lease_duration_ms: _Optional[int] = ..., reap_stale_seconds: _Optional[int] = ...) -> None: ...
+    recovery_hold: bool
+    def __init__(self, consumer: _Optional[str] = ..., lane: _Optional[str] = ..., lease_duration_ms: _Optional[int] = ..., reap_stale_seconds: _Optional[int] = ..., recovery_hold: _Optional[bool] = ...) -> None: ...
 
 class TakeResponse(_message.Message):
-    __slots__ = ("directive", "consumer", "lane", "claim_token")
+    __slots__ = ("directive", "consumer", "lane", "claim_token", "input_digest")
     DIRECTIVE_FIELD_NUMBER: _ClassVar[int]
     CONSUMER_FIELD_NUMBER: _ClassVar[int]
     LANE_FIELD_NUMBER: _ClassVar[int]
     CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    INPUT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     directive: Directive
     consumer: str
     lane: str
     claim_token: str
-    def __init__(self, directive: _Optional[_Union[Directive, _Mapping]] = ..., consumer: _Optional[str] = ..., lane: _Optional[str] = ..., claim_token: _Optional[str] = ...) -> None: ...
+    input_digest: str
+    def __init__(self, directive: _Optional[_Union[Directive, _Mapping]] = ..., consumer: _Optional[str] = ..., lane: _Optional[str] = ..., claim_token: _Optional[str] = ..., input_digest: _Optional[str] = ...) -> None: ...
 
 class PeekRequest(_message.Message):
-    __slots__ = ("lane",)
+    __slots__ = ("lane", "recovery_hold")
     LANE_FIELD_NUMBER: _ClassVar[int]
+    RECOVERY_HOLD_FIELD_NUMBER: _ClassVar[int]
     lane: str
-    def __init__(self, lane: _Optional[str] = ...) -> None: ...
+    recovery_hold: bool
+    def __init__(self, lane: _Optional[str] = ..., recovery_hold: _Optional[bool] = ...) -> None: ...
 
 class PeekResponse(_message.Message):
     __slots__ = ("directive",)
@@ -359,3 +367,51 @@ class UnparkResponse(_message.Message):
     id: str
     status: Status
     def __init__(self, id: _Optional[str] = ..., status: _Optional[_Union[Status, str]] = ...) -> None: ...
+
+class AdmitStageRequest(_message.Message):
+    __slots__ = ("admission_key", "body", "priority", "lane")
+    ADMISSION_KEY_FIELD_NUMBER: _ClassVar[int]
+    BODY_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
+    LANE_FIELD_NUMBER: _ClassVar[int]
+    admission_key: str
+    body: str
+    priority: Priority
+    lane: str
+    def __init__(self, admission_key: _Optional[str] = ..., body: _Optional[str] = ..., priority: _Optional[_Union[Priority, str]] = ..., lane: _Optional[str] = ...) -> None: ...
+
+class AdmitStageResponse(_message.Message):
+    __slots__ = ("directive",)
+    DIRECTIVE_FIELD_NUMBER: _ClassVar[int]
+    directive: Directive
+    def __init__(self, directive: _Optional[_Union[Directive, _Mapping]] = ...) -> None: ...
+
+class CompleteHandoffRequest(_message.Message):
+    __slots__ = ("id", "claim_token", "manifest_json")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    CLAIM_TOKEN_FIELD_NUMBER: _ClassVar[int]
+    MANIFEST_JSON_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    claim_token: str
+    manifest_json: str
+    def __init__(self, id: _Optional[str] = ..., claim_token: _Optional[str] = ..., manifest_json: _Optional[str] = ...) -> None: ...
+
+class CompleteHandoffResponse(_message.Message):
+    __slots__ = ("receipt_json",)
+    RECEIPT_JSON_FIELD_NUMBER: _ClassVar[int]
+    receipt_json: str
+    def __init__(self, receipt_json: _Optional[str] = ...) -> None: ...
+
+class GetHandoffReceiptRequest(_message.Message):
+    __slots__ = ("id",)
+    ID_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    def __init__(self, id: _Optional[str] = ...) -> None: ...
+
+class GetHandoffReceiptResponse(_message.Message):
+    __slots__ = ("found", "receipt_json")
+    FOUND_FIELD_NUMBER: _ClassVar[int]
+    RECEIPT_JSON_FIELD_NUMBER: _ClassVar[int]
+    found: bool
+    receipt_json: str
+    def __init__(self, found: _Optional[bool] = ..., receipt_json: _Optional[str] = ...) -> None: ...

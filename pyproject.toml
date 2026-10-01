@@ -29,9 +29,9 @@ dependencies = []
 
 [project.optional-dependencies]
 grpc = [
-  "grpcio>=1.48",
-  "grpcio-tools>=1.48",
-  "protobuf>=3.20",
+  "grpcio>=1.81.1",
+  "grpcio-tools>=1.81.1",
+  "protobuf>=6.33.5",
   "pyseto>=1.7",
 ]
 mcp = [
@@ -47,10 +47,10 @@ otel = [
 ]
 test = [
   "coverage[toml]>=7.6",
-  "grpcio>=1.48",
-  "grpcio-tools>=1.48",
+  "grpcio>=1.81.1",
+  "grpcio-tools>=1.81.1",
   "mcp>=1.2,<2",
-  "protobuf>=3.20",
+  "protobuf>=6.33.5",
   "pyseto>=1.7",
   "pytest>=8.3",
   "pytest-asyncio>=0.21",
