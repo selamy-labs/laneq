@@ -86,14 +86,20 @@ def connect() -> sqlite3.Connection:
     existed_before_open = path.exists()
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path, timeout=10)
-    conn.execute("PRAGMA journal_mode=WAL")
-    migrate(
-        conn,
-        path=path,
-        existed_before_open=existed_before_open,
-        keep_backups=DEFAULT_BACKUP_RETENTION,
-        report=sys.stderr,
-    )
+    from laneq.sqlite_init import enable_wal
+
+    try:
+        enable_wal(conn)
+        migrate(
+            conn,
+            path=path,
+            existed_before_open=existed_before_open,
+            keep_backups=DEFAULT_BACKUP_RETENTION,
+            report=sys.stderr,
+        )
+    except BaseException:
+        conn.close()
+        raise
     return conn
 
 
