@@ -105,6 +105,21 @@ class LaneqStub:
                 request_serializer=laneq__pb2.UnparkRequest.SerializeToString,
                 response_deserializer=laneq__pb2.UnparkResponse.FromString,
                 _registered_method=True)
+        self.AdmitStage = channel.unary_unary(
+                '/laneq.v1.Laneq/AdmitStage',
+                request_serializer=laneq__pb2.AdmitStageRequest.SerializeToString,
+                response_deserializer=laneq__pb2.AdmitStageResponse.FromString,
+                _registered_method=True)
+        self.CompleteHandoff = channel.unary_unary(
+                '/laneq.v1.Laneq/CompleteHandoff',
+                request_serializer=laneq__pb2.CompleteHandoffRequest.SerializeToString,
+                response_deserializer=laneq__pb2.CompleteHandoffResponse.FromString,
+                _registered_method=True)
+        self.GetHandoffReceipt = channel.unary_unary(
+                '/laneq.v1.Laneq/GetHandoffReceipt',
+                request_serializer=laneq__pb2.GetHandoffReceiptRequest.SerializeToString,
+                response_deserializer=laneq__pb2.GetHandoffReceiptResponse.FromString,
+                _registered_method=True)
 
 
 class LaneqServicer:
@@ -212,6 +227,27 @@ class LaneqServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def AdmitStage(self, request, context):
+        """Trusted qualifier admission; model workers must not receive this capability.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def CompleteHandoff(self, request, context):
+        """Fenced stage acknowledgement and successor admission in one transaction.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetHandoffReceipt(self, request, context):
+        """Read-only reconciliation after an uncertain completion response.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_LaneqServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -284,6 +320,21 @@ def add_LaneqServicer_to_server(servicer, server):
                     servicer.Unpark,
                     request_deserializer=laneq__pb2.UnparkRequest.FromString,
                     response_serializer=laneq__pb2.UnparkResponse.SerializeToString,
+            ),
+            'AdmitStage': grpc.unary_unary_rpc_method_handler(
+                    servicer.AdmitStage,
+                    request_deserializer=laneq__pb2.AdmitStageRequest.FromString,
+                    response_serializer=laneq__pb2.AdmitStageResponse.SerializeToString,
+            ),
+            'CompleteHandoff': grpc.unary_unary_rpc_method_handler(
+                    servicer.CompleteHandoff,
+                    request_deserializer=laneq__pb2.CompleteHandoffRequest.FromString,
+                    response_serializer=laneq__pb2.CompleteHandoffResponse.SerializeToString,
+            ),
+            'GetHandoffReceipt': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetHandoffReceipt,
+                    request_deserializer=laneq__pb2.GetHandoffReceiptRequest.FromString,
+                    response_serializer=laneq__pb2.GetHandoffReceiptResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -665,6 +716,87 @@ class Laneq:
             '/laneq.v1.Laneq/Unpark',
             laneq__pb2.UnparkRequest.SerializeToString,
             laneq__pb2.UnparkResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def AdmitStage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/laneq.v1.Laneq/AdmitStage',
+            laneq__pb2.AdmitStageRequest.SerializeToString,
+            laneq__pb2.AdmitStageResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CompleteHandoff(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/laneq.v1.Laneq/CompleteHandoff',
+            laneq__pb2.CompleteHandoffRequest.SerializeToString,
+            laneq__pb2.CompleteHandoffResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetHandoffReceipt(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/laneq.v1.Laneq/GetHandoffReceipt',
+            laneq__pb2.GetHandoffReceiptRequest.SerializeToString,
+            laneq__pb2.GetHandoffReceiptResponse.FromString,
             options,
             channel_credentials,
             insecure,

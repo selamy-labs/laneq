@@ -41,6 +41,7 @@ message Directive {
   string parent_id = 12; // Parent directive ID for threading; "" if root
   optional int64 not_before_unix = 13; // Eligibility gate; absent means always eligible
   repeated string blocked_by = 14; // List of blocking directive IDs (dependencies)
+  optional bool recovery_hold = 15; // Expiry parks ownership; absent in partial thread listings
 
   reserved 100 to 199; // Reserved for future expansion
 }
@@ -69,6 +70,7 @@ message TakeRequest {
   string lane = 2; // Default: "default"
   int64 lease_duration_ms = 3; // Lease duration in milliseconds
   int64 reap_stale_seconds = 4; // Optional: reap leases older than this many seconds
+  bool recovery_hold = 5; // Explicit opt-in: claim only protected stage directives
 }
 
 // Take response returns the claimed directive and lease.
@@ -77,11 +79,13 @@ message TakeResponse {
   string consumer = 2; // Echo of the requesting consumer
   string lane = 3;
   string claim_token = 4; // Per-claim token required for worker mutations
+  string input_digest = 5; // SHA256 of exact body for protected claims; empty for ordinary work
 }
 
 // Peek request queries the next eligible directive without claiming.
 message PeekRequest {
   string lane = 1; // Default: "default"
+  bool recovery_hold = 2; // Explicit opt-in: observe only protected stage directives
 }
 
 // Peek response returns the directive (if any) without claiming.
@@ -247,6 +251,38 @@ message UnparkResponse {
   Status status = 2; // Will be STATUS_PENDING
 }
 
+// AdmitStage request idempotently admits immutable protected root work.
+message AdmitStageRequest {
+  string admission_key = 1;
+  string body = 2;
+  Priority priority = 3; // Default: PRIORITY_P1
+  string lane = 4;
+}
+
+message AdmitStageResponse {
+  Directive directive = 1;
+}
+
+// CompleteHandoff seals output and publishes protected successors atomically.
+message CompleteHandoffRequest {
+  string id = 1;
+  string claim_token = 2;
+  string manifest_json = 3; // Strict bounded UTF-8 JSON; same contract as native CLI
+}
+
+message CompleteHandoffResponse {
+  string receipt_json = 1; // Sealed stage receipt, not project delivery
+}
+
+message GetHandoffReceiptRequest {
+  string id = 1;
+}
+
+message GetHandoffReceiptResponse {
+  bool found = 1;
+  string receipt_json = 2; // Empty when no sealed receipt exists
+}
+
 // Laneq service definition.
 service Laneq {
   // Push enqueues a new directive with the specified priority and lane.
@@ -293,4 +329,13 @@ service Laneq {
 
   // Unpark removes a directive from parked status (returns to pending).
   rpc Unpark(UnparkRequest) returns (UnparkResponse);
+
+  // Trusted qualifier admission; model workers must not receive this capability.
+  rpc AdmitStage(AdmitStageRequest) returns (AdmitStageResponse);
+
+  // Fenced stage acknowledgement and successor admission in one transaction.
+  rpc CompleteHandoff(CompleteHandoffRequest) returns (CompleteHandoffResponse);
+
+  // Read-only reconciliation after an uncertain completion response.
+  rpc GetHandoffReceipt(GetHandoffReceiptRequest) returns (GetHandoffReceiptResponse);
 }
