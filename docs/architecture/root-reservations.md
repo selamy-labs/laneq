@@ -1,8 +1,9 @@
 # Trusted root reservations
 
 `laneq.root_reservations` is a local Python library for a trusted feed producer
-and publisher. It adds no CLI, MCP, gRPC, network capability, model permission,
-or deployment. Existing generic queues and their consumers remain unchanged.
+and publisher. A separate `laneq.admission_bridge` provides a bounded, single-
+grant producer invocation. Neither interface adds MCP, gRPC, network capability,
+model permission or deployment. Existing generic queues and consumers remain unchanged.
 This increment does not establish production source qualification or a live
 worker saturation result.
 
@@ -78,6 +79,29 @@ Recording delivery atomically releases the logical reservation and enables
 dependencies carrying that exact receipt. This necessary local lineage check
 does not prove external CI, reviewer independence or publication by itself.
 Models must not receive database access or either producer/publisher function.
+
+## Pinned producer invocation
+
+The trusted producer may invoke `python -m laneq.admission_bridge` with fixed
+`--account`, `--namespace` and `--reservation-digest` launcher arguments. The
+digest is `parse_reservation(qualified_manifest).digest`; it binds the complete
+normalized reservation, including exact task body, identity, lane, priority,
+qualification reference, paths and dependencies. It is supplied by the trusted
+qualifier, never accepted from model output. The entire launcher, runtime and
+native module bytes still require owner custody/attestation before use.
+
+Stdin accepts only `{"operation":"admit","reservation":qualified_manifest}`,
+bounded to 128 KiB. The bridge snapshots the input, checks the complete pinned
+digest, owning implementation lane and namespace before touching the database,
+then calls the existing atomic reservation operation. Exact repeated invocation
+returns the original reservation; a changed grant is not a retry. Output is a
+protocol-1 JSON receipt or a bounded error type without input/backend details.
+
+This bridge has no claim, execution, successor, publication or release operation.
+It does not qualify spreadsheet prose, verify approval, canonicalize physical
+aliases or make old qualification evidence current. The producer must recheck
+those conditions and its live authority before each first admission. Keep the
+bridge and database unavailable to model processes. No publisher CLI is added.
 
 Use the database on one supported queue host, with native SQLite transactions.
 Do not share this database across arbitrary pods or network filesystems. A GCP
