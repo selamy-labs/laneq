@@ -90,12 +90,41 @@ qualification reference, paths and dependencies. It is supplied by the trusted
 qualifier, never accepted from model output. The entire launcher, runtime and
 native module bytes still require owner custody/attestation before use.
 
-Stdin accepts only `{"operation":"admit","reservation":qualified_manifest}`,
-bounded to 128 KiB. The bridge snapshots the input, checks the complete pinned
+Stdin accepts `{"operation":"admit","reservation":qualified_manifest}` or
+`{"operation":"inspect","reservation":qualified_manifest}`, bounded to
+128 KiB. Both operations snapshot the input and check the complete pinned
 digest, owning implementation lane and namespace before touching the database,
-then calls the existing atomic reservation operation. Exact repeated invocation
+and admission calls the existing atomic reservation operation. Exact repeated invocation
 returns the original reservation; a changed grant is not a retry. Output is a
 protocol-1 JSON receipt or a bounded error type without input/backend details.
+
+Inspection opens the same trusted `LANEQ_DB` path in SQLite read-only mode and
+reads one consistent snapshot. It neither creates/migrates the database nor
+reaps leases, claims work or releases reservations. A matching root returns its
+current receipt; an absent root in a complete initialized schema returns
+`{"protocol":1,"result":null}`. Missing database/schema, an unreserved admission
+with the same key, conflicting root content or a missing directive fail closed.
+The launcher must retain the exact original database identity across recovery.
+
+After an uncertain admission response, inspect the persisted immutable grant.
+An absent result **never authorizes a retry or releasing source/capacity holds**:
+the original writer may still commit after the read snapshot. The owner must
+retain uncertainty until it has independently established the writer outcome.
+
+```mermaid
+sequenceDiagram
+    participant Owner as Trusted producer
+    participant Bridge as Pinned admission bridge
+    participant DB as Native queue host
+    Owner->>Bridge: admit immutable reservation
+    Bridge->>DB: atomic admission and writer holds
+    DB-->>Bridge: committed receipt
+    Note over Owner,Bridge: Response lost; durable owner retains uncertainty
+    Owner->>Bridge: inspect same immutable reservation
+    Bridge->>DB: read-only consistent snapshot
+    DB-->>Owner: matching receipt, absence, or fail-closed error
+    Note over Owner,DB: Absence does not authorize replay or release
+```
 
 This bridge has no claim, execution, successor, publication or release operation.
 It does not qualify spreadsheet prose, verify approval, canonicalize physical
